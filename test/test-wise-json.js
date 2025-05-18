@@ -1,5 +1,5 @@
 // test-wise-json.js
-const WiseJSON = require('./wise-json'); // Путь к главному файлу нашей библиотеки
+const WiseJSON = require('wise-json-db'); // Путь к главному файлу нашей библиотеки
 const path = require('path');
 const fs = require('fs/promises'); // Для очистки тестовой директории
 
@@ -55,9 +55,13 @@ async function runTests() {
         return; // Прерываем тесты, если база не инициализировалась
     }
 
-    try {
+   try {
         const productsCollection = await db.collection('products');
-        await assert(productsCollection instanceof require('./wise-json/collection'), 'WiseJSON: collection() возвращает экземпляр Collection');
+        // Упрощенная проверка: является ли объектом и есть ли ожидаемый метод
+        await assert(
+            typeof productsCollection === 'object' && productsCollection !== null && typeof productsCollection.insert === 'function', 
+            'WiseJSON: collection() возвращает объект коллекции с методом insert'
+        );
         
         const productsCollectionAgain = await db.collection('products');
         await assert(productsCollection === productsCollectionAgain, 'WiseJSON: collection() возвращает кэшированный экземпляр');

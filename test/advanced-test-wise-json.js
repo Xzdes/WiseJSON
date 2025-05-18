@@ -1,5 +1,5 @@
 // advanced-test-wise-json.js
-const WiseJSON = require('./wise-json');
+const WiseJSON = require('wise-json-db');
 const path = require('path');
 const fs = require('fs/promises');
 const assert = require('assert').strict;
