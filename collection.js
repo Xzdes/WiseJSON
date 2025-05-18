@@ -25,6 +25,7 @@ class Collection {
      * @param {object} [options={}] - Опции для этой коллекции.
      * @param {number} [options.maxSegmentSizeBytes=DEFAULT_MAX_SEGMENT_SIZE_BYTES] - Максимальный размер сегмента в байтах.
      * @param {number | null} [options.jsonIndent=DEFAULT_JSON_INDENT] - Отступ для JSON-файлов.
+     * @param {function(): string|number} [options.idGenerator] - Функция для генерации ID. По умолчанию uuidv4.
      */
     constructor(collectionName, dbDirectoryPath, options = {}) {
         this.collectionName = collectionName;
@@ -32,74 +33,49 @@ class Collection {
         this.options = {
             maxSegmentSizeBytes: options.maxSegmentSizeBytes || DEFAULT_MAX_SEGMENT_SIZE_BYTES,
             jsonIndent: options.jsonIndent !== undefined ? options.jsonIndent : DEFAULT_JSON_INDENT,
+            idGenerator: options.idGenerator || (() => uuidv4())
         };
 
-        this.currentSegmentIndex = 0; // Индекс текущего сегмента для записи
-        this.writeQueue = Promise.resolve(); // Очередь для последовательного выполнения операций записи
+        this.currentSegmentIndex = 0;
+        this.writeQueue = Promise.resolve();
         this.isInitialized = false;
-        this.initPromise = this._initialize(); // Промис, который разрешается после завершения инициализации
+        this.initPromise = this._initialize();
+
+        this._listeners = {}; // Для хуков/событий
     }
 
-    /**
-     * Асинхронно инициализирует коллекцию: создает директорию, определяет/создает начальный сегмент.
-     * @private
-     */
     async _initialize() {
         try {
             await fs.mkdir(this.collectionDirectoryPath, { recursive: true });
             const segmentFiles = await this._getSegmentFiles();
-
             if (segmentFiles.length > 0) {
-                // Если сегменты существуют, определяем индекс последнего
                 const lastSegmentName = segmentFiles[segmentFiles.length - 1];
                 this.currentSegmentIndex = this._getSegmentIndexFromName(lastSegmentName);
             } else {
-                // Если сегментов нет, создаем первый пустой сегмент (_0.json)
                 await this._writeSegmentData(this.currentSegmentIndex, []);
             }
             this.isInitialized = true;
         } catch (error) {
             console.error(`WiseJSON: Ошибка инициализации коллекции "${this.collectionName}": ${error.message}`, error.stack);
-            throw error; // Перебрасываем ошибку для обработки выше
+            throw error;
         }
     }
 
-    /**
-     * Гарантирует, что коллекция была инициализирована.
-     * @private
-     */
     async _ensureInitialized() {
         if (!this.isInitialized) {
             await this.initPromise;
         }
     }
 
-    /**
-     * Формирует полный путь к файлу-сегменту.
-     * @param {number} index - Индекс сегмента.
-     * @returns {string} Полный путь к файлу сегмента.
-     * @private
-     */
     _getSegmentPath(index) {
         return path.join(this.collectionDirectoryPath, `${this.collectionName}_${index}.json`);
     }
 
-    /**
-     * Извлекает индекс сегмента из его имени файла.
-     * @param {string} fileName - Имя файла сегмента.
-     * @returns {number} Индекс сегмента.
-     * @private
-     */
     _getSegmentIndexFromName(fileName) {
         const match = fileName.match(/_(\d+)\.json$/);
         return match ? parseInt(match[1], 10) : 0;
     }
 
-    /**
-     * Получает отсортированный список имен файлов-сегментов коллекции.
-     * @returns {Promise<string[]>} Массив имен файлов.
-     * @private
-     */
     async _getSegmentFiles() {
         try {
             const files = await fs.readdir(this.collectionDirectoryPath);
@@ -114,13 +90,6 @@ class Collection {
         }
     }
 
-    /**
-     * Читает и парсит данные из указанного файла-сегмента.
-     * @param {number} index - Индекс сегмента.
-     * @returns {Promise<object[]>} Массив документов из сегмента.
-     * @throws {Error} Если файл сегмента поврежден или нечитаем.
-     * @private
-     */
     async _readSegmentData(index) {
         const segmentPath = this._getSegmentPath(index);
         try {
@@ -130,25 +99,15 @@ class Collection {
             if (error.code === 'ENOENT') {
                 return []; 
             }
-            // ИЗМЕНЕНИЕ ДЛЯ ОШИБКИ 2 (Вариант А)
             const userFriendlyMessage = `WiseJSON: Сегмент "${segmentPath}" поврежден или нечитаем. (Исходная ошибка: ${error.message})`;
-            console.error(userFriendlyMessage, error.stack);
-            throw new Error(userFriendlyMessage);
+            console.error(userFriendlyMessage, error.stack); // Логируем для администратора
+            throw new Error(userFriendlyMessage); // Выбрасываем для обработки приложением
         }
     }
 
-    /**
-     * Записывает данные в указанный файл-сегмент, используя временный файл и переименование.
-     * @param {number} index - Индекс сегмента.
-     * @param {object[]} data - Массив документов для записи.
-     * @returns {Promise<number>} Размер записанных данных в байтах.
-     * @throws {Error} Если произошла ошибка записи.
-     * @private
-     */
     async _writeSegmentData(index, data) {
         const segmentPath = this._getSegmentPath(index);
         const tempSegmentPath = `${segmentPath}.tmp.${uuidv4()}`; 
-
         try {
             const jsonData = JSON.stringify(data, null, this.options.jsonIndent);
             await fs.writeFile(tempSegmentPath, jsonData, 'utf-8');
@@ -169,96 +128,144 @@ class Collection {
         }
     }
 
-    /**
-     * Добавляет асинхронную операцию записи в очередь для последовательного выполнения.
-     * @param {Function} operationFn - Асинхронная функция, выполняющая операцию записи.
-     * @returns {Promise<any>} Промис результата выполнения операции.
-     * @private
-     */
     _enqueueWriteOperation(operationFn) {
-        // ИЗМЕНЕНИЕ ДЛЯ ОШИБКИ 1
         const operationPromise = this.writeQueue
             .catch(prevErrInQueue => {
-                // Этот catch обрабатывает ситуацию, если *предыдущая* операция в очереди завершилась ошибкой.
-                // Мы логируем эту ошибку, но позволяем текущей операции попытаться выполниться.
-                // Это предотвращает полную блокировку очереди из-за одной неудачной операции,
-                // если последующие операции могут быть независимы.
-                // Для тестов, где мы намеренно вызываем ошибки, это поможет их изолировать.
+                // Этот catch "поглощает" ошибку предыдущей операции в очереди,
+                // позволяя следующей операции попытаться выполниться.
+                // Полезно для тестов, где ошибки вызываются намеренно.
                 console.warn(`WiseJSON Info: Предыдущая операция в очереди для "${this.collectionName}" завершилась с ошибкой: ${prevErrInQueue.message}. Запускаем следующую...`);
-                return Promise.resolve(); // "Сбрасываем" состояние ошибки для текущей цепочки .then()
+                return Promise.resolve(); 
             })
-            .then(() => this._ensureInitialized()) // Гарантируем инициализацию перед текущей операцией
+            .then(() => this._ensureInitialized())
             .then(() => operationFn()) // Выполняем текущую операцию
             .catch(currentOperationError => {
-                // Этот catch ловит ошибку, выброшенную *текущей* operationFn или _ensureInitialized.
-                // Мы должны перебросить именно эту ошибку, чтобы вызывающий код ее получил.
-                // console.error(`WiseJSON DEBUG: Ошибка в текущей операции для "${this.collectionName}": ${currentOperationError.message}`);
+                // Перебрасываем ошибку текущей операции, чтобы вызывающий код ее получил.
                 return Promise.reject(currentOperationError);
             });
-
-        this.writeQueue = operationPromise; // Обновляем "хвост" очереди на промис текущей операции
+        this.writeQueue = operationPromise; // Обновляем "хвост" очереди
         return operationPromise; // Возвращаем промис текущей операции
     }
 
-    /**
-     * Вставляет новый документ в коллекцию.
-     * @param {object} itemData - Данные документа для вставки. Поле _id будет проигнорировано.
-     * @returns {Promise<object>} Вставленный документ с сгенерированным _id, createdAt, updatedAt.
-     */
-    async insert(itemData) {
-        return this._enqueueWriteOperation(async () => {
-            if (!itemData || typeof itemData !== 'object') {
-                throw new Error("WiseJSON: Данные для вставки (itemData) должны быть объектом.");
-            }
-            const cleanItemData = { ...itemData };
-            delete cleanItemData._id;
-            delete cleanItemData.createdAt;
-            delete cleanItemData.updatedAt;
-
-            let currentSegmentData = await this._readSegmentData(this.currentSegmentIndex);
-            const newItem = {
-                _id: uuidv4(),
-                ...cleanItemData,
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-            };
-
-            const potentialNewData = [...currentSegmentData, newItem];
-            const jsonDataSize = Buffer.byteLength(JSON.stringify(potentialNewData, null, this.options.jsonIndent), 'utf8');
-
-            if (jsonDataSize > this.options.maxSegmentSizeBytes && currentSegmentData.length > 0) {
-                this.currentSegmentIndex++;
-                await this._writeSegmentData(this.currentSegmentIndex, [newItem]);
-            } else {
-                currentSegmentData.push(newItem);
-                await this._writeSegmentData(this.currentSegmentIndex, currentSegmentData);
-            }
-            return newItem;
-        });
+    _emit(eventName, ...args) {
+        const listeners = this._listeners[eventName];
+        if (listeners && listeners.length > 0) {
+            listeners.forEach(listener => {
+                try {
+                    Promise.resolve(listener(...args)).catch(listenerError => {
+                        console.error(`WiseJSON: Ошибка в слушателе события '${eventName}' для коллекции '${this.collectionName}': ${listenerError.message}`, listenerError.stack);
+                    });
+                } catch (syncError) { 
+                    console.error(`WiseJSON: Синхронная ошибка при вызове слушателя события '${eventName}' для коллекции '${this.collectionName}': ${syncError.message}`, syncError.stack);
+                }
+            });
+        }
     }
 
-    /**
-     * Получает все документы из коллекции.
-     * @returns {Promise<object[]>} Массив всех документов.
-     */
+    on(eventName, listener) {
+        if (typeof listener !== 'function') {
+            throw new Error('WiseJSON: Слушатель должен быть функцией.');
+        }
+        if (!this._listeners[eventName]) {
+            this._listeners[eventName] = [];
+        }
+        this._listeners[eventName].push(listener);
+    }
+
+    off(eventName, listener) {
+        if (!this._listeners[eventName]) {
+            return;
+        }
+        if (!listener) {
+            delete this._listeners[eventName];
+        } else {
+            this._listeners[eventName] = this._listeners[eventName].filter(l => l !== listener);
+            if (this._listeners[eventName].length === 0) {
+                delete this._listeners[eventName];
+            }
+        }
+    }
+
+    async _rawInsert(itemDataToInsert) {
+        // itemDataToInsert - это уже "чистые" данные, возможно с _id, createdAt, updatedAt от upsert
+        const newItem = {
+            _id: itemDataToInsert._id || this.options.idGenerator(),
+            ...itemDataToInsert, // Применяем все поля из itemDataToInsert
+            // Гарантируем, что createdAt и updatedAt будут установлены, если их нет
+            createdAt: itemDataToInsert.createdAt || new Date().toISOString(),
+            updatedAt: itemDataToInsert.updatedAt || new Date().toISOString(),
+        };
+        // Перезаписываем на случай, если они были в itemDataToInsert, но не как главные поля
+        newItem._id = newItem._id; 
+        newItem.createdAt = newItem.createdAt;
+        newItem.updatedAt = newItem.updatedAt;
+
+
+        let currentSegmentData = await this._readSegmentData(this.currentSegmentIndex);
+        
+        const potentialNewData = [...currentSegmentData, newItem];
+        const jsonDataSize = Buffer.byteLength(JSON.stringify(potentialNewData, null, this.options.jsonIndent), 'utf8');
+
+        if (jsonDataSize > this.options.maxSegmentSizeBytes && currentSegmentData.length > 0) {
+            this.currentSegmentIndex++;
+            await this._writeSegmentData(this.currentSegmentIndex, [newItem]);
+        } else {
+            currentSegmentData.push(newItem);
+            await this._writeSegmentData(this.currentSegmentIndex, currentSegmentData);
+        }
+        this._emit('afterInsert', { ...newItem }); 
+        return newItem;
+    }
+
+    async _rawUpdate(id, updatesToApply) {
+        // updatesToApply - это "чистые" данные для обновления, без _id, createdAt
+        let originalDocumentSnapshot = null; 
+        const segmentFiles = await this._getSegmentFiles();
+
+        for (const segmentFileName of segmentFiles) {
+            const segmentIndex = this._getSegmentIndexFromName(segmentFileName);
+            let segmentData = await this._readSegmentData(segmentIndex);
+            const itemIndex = segmentData.findIndex(item => item._id === id);
+
+            if (itemIndex !== -1) {
+                originalDocumentSnapshot = { ...segmentData[itemIndex] }; 
+                const updatedItem = {
+                    ...segmentData[itemIndex],
+                    ...updatesToApply, 
+                    updatedAt: new Date().toISOString(),
+                };
+                segmentData[itemIndex] = updatedItem;
+                await this._writeSegmentData(segmentIndex, segmentData);
+                this._emit('afterUpdate', { ...updatedItem }, originalDocumentSnapshot); 
+                return updatedItem;
+            }
+        }
+        return null;
+    }
+
+    async insert(itemData) {
+        const cleanItemData = { ...itemData };
+        // Публичный insert всегда генерирует новый _id и даты
+        delete cleanItemData._id; 
+        delete cleanItemData.createdAt;
+        delete cleanItemData.updatedAt;
+        
+        // _rawInsert использует this.options.idGenerator() и new Date() если поля не переданы
+        return this._enqueueWriteOperation(() => this._rawInsert(cleanItemData));
+    }
+
     async getAll() {
         await this._ensureInitialized();
         const allItems = [];
-        const segmentFiles = await this._getSegmentFiles(); 
-
+        const segmentFiles = await this._getSegmentFiles();
         for (const segmentFileName of segmentFiles) {
             const index = this._getSegmentIndexFromName(segmentFileName);
-            const segmentData = await this._readSegmentData(index); 
+            const segmentData = await this._readSegmentData(index);
             allItems.push(...segmentData);
         }
         return allItems;
     }
 
-    /**
-     * Находит документы, соответствующие функции-предикату.
-     * @param {function(object): boolean} queryFunction - Функция-фильтр.
-     * @returns {Promise<object[]>} Массив найденных документов.
-     */
     async find(queryFunction) {
         if (typeof queryFunction !== 'function') {
             throw new Error("WiseJSON: queryFunction для find должен быть функцией.");
@@ -267,21 +274,15 @@ class Collection {
         return allItems.filter(queryFunction);
     }
 
-    /**
-     * Находит первый документ, соответствующий функции-предикату.
-     * @param {function(object): boolean} queryFunction - Функция-фильтр.
-     * @returns {Promise<object|null>} Найденный документ или null.
-     */
     async findOne(queryFunction) {
         if (typeof queryFunction !== 'function') {
             throw new Error("WiseJSON: queryFunction для findOne должен быть функцией.");
         }
         await this._ensureInitialized();
         const segmentFiles = await this._getSegmentFiles();
-
         for (const segmentFileName of segmentFiles) {
             const index = this._getSegmentIndexFromName(segmentFileName);
-            const segmentData = await this._readSegmentData(index); 
+            const segmentData = await this._readSegmentData(index);
             const foundItem = segmentData.find(queryFunction);
             if (foundItem) {
                 return foundItem;
@@ -290,11 +291,6 @@ class Collection {
         return null;
     }
 
-    /**
-     * Находит документ по его _id.
-     * @param {string} id - Уникальный идентификатор документа.
-     * @returns {Promise<object|null>} Найденный документ или null.
-     */
     async getById(id) {
         if (!id || typeof id !== 'string') {
             throw new Error("WiseJSON: ID для getById должен быть непустой строкой.");
@@ -302,74 +298,120 @@ class Collection {
         return this.findOne(item => item._id === id);
     }
 
-    /**
-     * Обновляет документ с указанным ID.
-     * @param {string} id - ID документа для обновления.
-     * @param {object} updates - Объект с полями для обновления. Поля _id и createdAt будут проигнорированы.
-     * @returns {Promise<object|null>} Обновленный документ или null, если документ не найден.
-     */
     async update(id, updates) {
-        return this._enqueueWriteOperation(async () => {
-            if (!id || typeof id !== 'string') {
-                throw new Error("WiseJSON: ID для update должен быть непустой строкой.");
-            }
-            if (!updates || typeof updates !== 'object' || Object.keys(updates).length === 0) {
-                throw new Error("WiseJSON: Объект обновлений (updates) не предоставлен, пуст или не является объектом.");
-            }
+        const cleanUpdates = { ...updates };
+        if (cleanUpdates._id && cleanUpdates._id !== id) {
+            console.warn(`WiseJSON: Попытка изменить _id на '${cleanUpdates._id}' для документа с ID '${id}' при обновлении. Поле _id в объекте updates будет проигнорировано.`);
+        }
+        delete cleanUpdates._id; 
+        delete cleanUpdates.createdAt; 
 
-            const cleanUpdates = { ...updates };
-            if (cleanUpdates._id && cleanUpdates._id !== id) {
-                console.warn(`WiseJSON: Попытка изменить _id на '${cleanUpdates._id}' для документа с ID '${id}' при обновлении. Поле _id не будет изменено.`);
-            }
-            delete cleanUpdates._id; 
-            delete cleanUpdates.createdAt; 
-
-            const segmentFiles = await this._getSegmentFiles();
-            for (const segmentFileName of segmentFiles) {
-                const segmentIndex = this._getSegmentIndexFromName(segmentFileName);
-                let segmentData = await this._readSegmentData(segmentIndex); 
-                
-                const itemIndex = segmentData.findIndex(item => item._id === id);
-
-                if (itemIndex !== -1) {
-                    const updatedItem = {
-                        ...segmentData[itemIndex], 
-                        ...cleanUpdates,           
-                        updatedAt: new Date().toISOString(), 
-                    };
-                    segmentData[itemIndex] = updatedItem; 
-                    await this._writeSegmentData(segmentIndex, segmentData); 
-                    return updatedItem;
-                }
-            }
-            return null; 
-        });
+        return this._enqueueWriteOperation(() => this._rawUpdate(id, cleanUpdates));
     }
 
-    /**
-     * Удаляет документ с указанным ID.
-     * @param {string} id - ID документа для удаления.
-     * @returns {Promise<boolean>} true, если документ был удален, false - если не найден.
-     */
     async remove(id) {
         return this._enqueueWriteOperation(async () => {
             if (!id || typeof id !== 'string') {
                 throw new Error("WiseJSON: ID для remove должен быть непустой строкой.");
             }
+            let removedDocumentSnapshot = null; 
             const segmentFiles = await this._getSegmentFiles();
             for (const segmentFileName of segmentFiles) {
                 const segmentIndex = this._getSegmentIndexFromName(segmentFileName);
-                let segmentData = await this._readSegmentData(segmentIndex); 
+                let segmentData = await this._readSegmentData(segmentIndex);
+                
+                const itemToRemoveIndex = segmentData.findIndex(item => item._id === id);
+                if (itemToRemoveIndex !== -1) {
+                    removedDocumentSnapshot = { ...segmentData[itemToRemoveIndex] }; 
+                }
 
-                const initialLength = segmentData.length;
                 const newData = segmentData.filter(item => item._id !== id);
 
-                if (newData.length < initialLength) {
+                if (newData.length < segmentData.length) { 
                     await this._writeSegmentData(segmentIndex, newData);
+                    if (removedDocumentSnapshot) { 
+                        this._emit('afterRemove', id, removedDocumentSnapshot);
+                    }
                     return true;
                 }
             }
-            return false; 
+            return false;
+        });
+    }
+
+    async count(queryFunction) {
+        await this._ensureInitialized();
+        let documentCount = 0;
+        const segmentFiles = await this._getSegmentFiles();
+        for (const segmentFileName of segmentFiles) {
+            const index = this._getSegmentIndexFromName(segmentFileName);
+            const segmentData = await this._readSegmentData(index);
+            if (queryFunction && typeof queryFunction === 'function') {
+                for (const document of segmentData) {
+                    if (queryFunction(document)) {
+                        documentCount++;
+                    }
+                }
+            } else {
+                documentCount += segmentData.length;
+            }
+        }
+        return documentCount;
+    }
+
+    async upsert(query, dataToUpsert, options = {}) {
+        return this._enqueueWriteOperation(async () => {
+            // console.log(`WISEJSON UPSERT: Начало. Коллекция: ${this.collectionName}. Query: ${typeof query === 'function' ? 'function' : JSON.stringify(query)}`);
+
+            if (!query || (typeof query !== 'object' && typeof query !== 'function')) {
+                throw new Error("WiseJSON: query для upsert должен быть объектом или функцией.");
+            }
+            if (!dataToUpsert || typeof dataToUpsert !== 'object') {
+                throw new Error("WiseJSON: dataToUpsert для upsert должен быть объектом.");
+            }
+
+            const queryFn = typeof query === 'function' ? query : (doc =>
+                Object.keys(query).every(key => doc[key] === query[key])
+            );
+
+            // console.log(`WISEJSON UPSERT: Перед findOne для ${this.collectionName}`);
+            const existingDocument = await this.findOne(queryFn);
+            // console.log(`WISEJSON UPSERT: После findOne для ${this.collectionName}. existingDocument:`, existingDocument ? existingDocument._id : null);
+
+            if (existingDocument) {
+                // console.log(`WISEJSON UPSERT: Документ найден (${existingDocument._id}), ВЫЗОВ _rawUpdate...`);
+                const updatesForRaw = { ...dataToUpsert };
+                delete updatesForRaw._id; 
+                delete updatesForRaw.createdAt;
+
+                const updatedDocument = await this._rawUpdate(existingDocument._id, updatesForRaw);
+                // console.log(`WISEJSON UPSERT: _rawUpdate завершен. updatedDocument:`, updatedDocument ? updatedDocument._id : null);
+                return { document: updatedDocument, operation: 'updated' };
+            } else {
+                // console.log(`WISEJSON UPSERT: Документ не найден, ВЫЗОВ _rawInsert...`);
+                let documentToInsert = {};
+                if (typeof query === 'object' && query !== null) {
+                    documentToInsert = { ...query };
+                }
+                documentToInsert = { ...documentToInsert, ...dataToUpsert };
+                
+                if (options.setOnInsert && typeof options.setOnInsert === 'object') {
+                    documentToInsert = { ...documentToInsert, ...options.setOnInsert };
+                }
+                
+                // _id, createdAt, updatedAt будут сгенерированы в _rawInsert, если их нет,
+                // или взяты из documentToInsert, если они там есть (например, _id из query)
+                // Очистим createdAt/updatedAt, чтобы _rawInsert их точно сгенерировал свежими
+                // для новой записи, если только они не были специфично заданы в setOnInsert.
+                // Но для простоты, _rawInsert сам позаботится о них.
+                // Если _id был в query, он сохранится.
+                delete documentToInsert.createdAt; 
+                delete documentToInsert.updatedAt;
+
+                const insertedDocument = await this._rawInsert(documentToInsert); 
+                // console.log(`WISEJSON UPSERT: _rawInsert завершен. insertedDocument:`, insertedDocument ? insertedDocument._id : null);
+                return { document: insertedDocument, operation: 'inserted' };
+            }
         });
     }
 }
