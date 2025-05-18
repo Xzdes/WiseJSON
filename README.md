@@ -12,7 +12,7 @@ WiseJSON - это легковесная, встраиваемая база да
 *   **Минимальные зависимости:** WiseJSON написана на чистом JavaScript и использует только встроенные модули Node.js (`fs/promises`, `path`) и одну легковесную внешнюю зависимость (`uuid`) для генерации уникальных идентификаторов документов.
 *   **Настраиваемость:** Позволяет пользователю конфигурировать ключевые параметры, такие как путь к хранилищу данных, максимальный размер файла-сегмента, форматирование JSON-файлов и даже функцию для генерации ID документов.
 *   **Система хуков (событий):** Предоставляет простой механизм для подписки на события жизненного цикла документов (`afterInsert`, `afterUpdate`, `afterRemove`), позволяя расширять функциональность приложения без модификации ядра библиотеки.
-
+    
 ## Установка
 
 1.  **Скопируйте библиотеку:**
@@ -68,14 +68,14 @@ db.baseDirInitPromise
         console.error('WiseJSON: КРИТИЧЕСКАЯ ОШИБКА при инициализации хранилища. Приложение не может стартовать.', initializationError);
         process.exit(1); // Завершение работы, если БД не может быть инициализирована
     });
-
+    
 async function startApplication() {
     // ... ваша логика ...
     // Например, работа с коллекциями:
     // manageProducts().catch(console.error);
 }
-Use code with caution.
-Markdown
+```
+
 2. Работа с Коллекциями
 Данные в WiseJSON организуются в коллекции. Каждая коллекция управляется отдельным экземпляром класса Collection.
 async function manageProducts() {
@@ -90,13 +90,12 @@ async function manageProducts() {
         // Например:
         // const allProds = await productsCollection.getAll();
         // console.log('Все продукты:', allProds);
-
+        
     } catch (error) {
         console.error('Ошибка при получении коллекции "products":', error);
     }
 }
-Use code with caution.
-JavaScript
+
 3. API Коллекции (Collection)
 Все методы экземпляра Collection асинхронны и возвращают Promise.
 async collection.insert(dataObject)
@@ -111,10 +110,10 @@ const newProduct = await productsCollection.insert({
     features: ['GPS', 'Heart rate monitor'],
     stock: 75
 });
-// newProduct: { _id: '...', name: '...', ..., createdAt: '...', updatedAt: '...' }
-Use code with caution.
-JavaScript
+```
+
 async collection.getById(id)
+
 Находит документ по его уникальному идентификатору _id.
 id (string): _id искомого документа.
 Возвращает: Promise<object|null> - найденный документ или null, если документ не найден.
@@ -122,8 +121,8 @@ const product = await productsCollection.getById(newProduct._id);
 Use code with caution.
 JavaScript
 async collection.find(queryFunction)
+
 Находит все документы, удовлетворяющие условию, заданному функцией-предикатом.
-queryFunction (function): Функция вида (document) => boolean. Возвращает true, если документ соответствует критерию.
 Возвращает: Promise<object[]> - массив найденных документов. Может быть пустым.
 const techCorpProducts = await productsCollection.find(
     item => item.brand === 'TechCorp' && item.price < 15000
@@ -131,8 +130,8 @@ const techCorpProducts = await productsCollection.find(
 Use code with caution.
 JavaScript
 async collection.findOne(queryFunction)
+
 Находит первый документ, удовлетворяющий условию, заданному функцией-предикатом.
-queryFunction (function): Функция вида (document) => boolean.
 Возвращает: Promise<object|null> - первый найденный документ или null.
 const firstInStock = await productsCollection.findOne(item => item.stock > 0);
 Use code with caution.
@@ -144,6 +143,7 @@ const allItems = await productsCollection.getAll();
 Use code with caution.
 JavaScript
 async collection.update(id, updatesObject)
+
 Обновляет документ с указанным _id.
 id (string): _id документа для обновления.
 updatesObject (object): Объект, содержащий поля и их новые значения.
@@ -162,6 +162,7 @@ const updated = await productsCollection.update(newProduct._id, {
 Use code with caution.
 JavaScript
 async collection.remove(id)
+
 Удаляет документ с указанным _id.
 id (string): _id документа для удаления.
 Возвращает: Promise<boolean> - true, если документ был успешно удален, false - если документ не найден.
@@ -169,6 +170,7 @@ const wasDeleted = await productsCollection.remove(newProduct._id);
 Use code with caution.
 JavaScript
 async collection.count([queryFunction])
+
 Подсчитывает количество документов в коллекции.
 queryFunction (function, необязательный): Функция-фильтр (document) => boolean. Если не предоставлена, подсчитываются все документы.
 Возвращает: Promise<number> - количество документов.
@@ -177,6 +179,7 @@ const techCorpCount = await productsCollection.count(item => item.brand === 'Tec
 Use code with caution.
 JavaScript
 async collection.upsert(query, dataToUpsert, [options])
+
 Обновляет документ, если он найден по query, иначе вставляет новый.
 query (object | function):
 Объект: Поиск по точному совпадению всех полей объекта.
@@ -193,7 +196,7 @@ const upsertResult = await usersCollection.upsert(
     userProfile,  // Данные для обновления или основные данные для вставки
     { setOnInsert: { registrationDate: new Date().toISOString(), bonusPoints: 0 } } // Доп. поля при вставке
 );
-
+    
 if (upsertResult.operation === 'inserted') {
     console.log('Новый пользователь создан:', upsertResult.document);
 } else {
@@ -202,6 +205,7 @@ if (upsertResult.operation === 'inserted') {
 Use code with caution.
 JavaScript
 4. Хуки / События
+
 WiseJSON позволяет подписываться на события жизненного цикла документов в коллекции. Это может быть полезно для логирования, аудита, инвалидации кэша или запуска связанных процессов (но без гарантий транзакционности).
 collection.on(eventName, listenerFunction): Подписывает listenerFunction на событие eventName.
 collection.off(eventName, [listenerFunction]): Отписывает listenerFunction от события. Если listenerFunction не указана, отписывает всех слушателей для eventName.
@@ -213,7 +217,7 @@ collection.off(eventName, [listenerFunction]): Отписывает listenerFunc
 Слушатели событий выполняются асинхронно и не блокируют завершение основной CRUD-операции.
 Ошибки, возникшие внутри слушателя события, логируются WiseJSON, но не влияют на результат основной операции и не прерывают ее.
 const auditLogCollection = await db.collection('audit_log');
-
+    
 productsCollection.on('afterInsert', async (newProduct) => {
     console.log(`EVENT: Продукт добавлен - ID: ${newProduct._id}, Имя: ${newProduct.name}`);
     try {
@@ -227,7 +231,7 @@ productsCollection.on('afterInsert', async (newProduct) => {
         console.error("Ошибка записи в аудит лог (afterInsert):", auditError);
     }
 });
-
+    
 productsCollection.on('afterUpdate', async (updatedProduct, oldProduct) => {
     console.log(`EVENT: Продукт обновлен - ID: ${updatedProduct._id}, Старое имя: ${oldProduct.name}, Новое имя: ${updatedProduct.name}`);
     // Логирование изменений...
@@ -235,6 +239,7 @@ productsCollection.on('afterUpdate', async (updatedProduct, oldProduct) => {
 Use code with caution.
 JavaScript
 Структура Хранения Данных
+
 Корневая директория: Указывается при создании new WiseJSON(dbRootPath).
 Директории коллекций: Создаются внутри корневой директории (например, dbRootPath/products/).
 Файлы-сегменты: Внутри директории коллекции (например, products_0.json, products_1.json).
@@ -244,6 +249,7 @@ _id (string): Уникальный идентификатор (по умолча
 createdAt (string): Время создания документа в формате ISO 8601.
 updatedAt (string): Время последнего обновления документа в формате ISO 8601.
 Обработка Ошибок
+
 Все асинхронные методы WiseJSON возвращают промисы. При возникновении ошибок (проблемы с файловой системой, невалидный JSON, некорректные аргументы методов и т.д.) промис будет отклонен (rejected) с объектом Error, содержащим описание проблемы. Используйте try...catch с async/await или метод .catch() для обработки этих ошибок в вашем приложении.
 try {
     const product = await productsCollection.getById('несуществующий-id');
@@ -257,36 +263,31 @@ try {
 Use code with caution.
 JavaScript
 Тестирование
+
 WiseJSON включает набор тестов (advanced-test-wise-json.js), которые проверяют основной функционал.
 Для запуска:
 Убедитесь, что вы находитесь в корневой директории вашего проекта, где расположен файл advanced-test-wise-json.js и папка wise-json.
 Выполните команду в терминале:
 node advanced-test-wise-json.js
-Use code with caution.
-Bash
+
 Тестовый скрипт создаст временную директорию test_db_data_advanced для своих нужд. Вы можете раскомментировать строку await cleanupTestDB(); в конце файла advanced-test-wise-json.js для автоматической очистки после тестов.
 Ограничения и Рекомендации
+
 Транзакции между коллекциями: WiseJSON не обеспечивает атомарные транзакции, охватывающие несколько коллекций или операций. Обеспечение консистентности в таких сценариях (например, с помощью компенсирующих транзакций) является ответственностью приложения.
 Ссылочная целостность: Не поддерживается.
 Одновременный доступ из нескольких процессов: WiseJSON не предназначена для одновременной модификации одной и той же базы данных (dbRootPath) из нескольких независимых процессов Node.js. Это может привести к повреждению данных.
 Производительность: Оптимизирована для простоты и надежности. Для очень высоких нагрузок или больших данных, операции чтения, требующие полного сканирования коллекции (например, find или count без очень специфичных оптимизаций), могут замедляться с ростом числа сегментов.
 Резервное копирование: Регулярно создавайте резервные копии всей директории dbRootPath.
 Индексы: В текущей версии отсутствуют сложные механизмы индексирования. Поиск по полям, отличным от _id (через find/findOne с функцией-предикатом), требует полного сканирования данных коллекции.
-Лицензия
+
+## Лицензия
+
 MIT License
-Copyright (c) 2024 Guliaev
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+
+Copyright (c) 2025 Guliaev
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
