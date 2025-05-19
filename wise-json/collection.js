@@ -51,15 +51,18 @@ class Collection {
             await this._recoverSegments(); 
             
             const segmentFiles = await this._getActualSegmentFiles();
+
             if (segmentFiles.length > 0) {
                 const lastSegmentName = segmentFiles[segmentFiles.length - 1];
-                this.currentSegmentIndex = this._getSegmentIndexFromName(lastSegmentName);
-                 if (this.currentSegmentIndex === -1 && segmentFiles.length === 1 && segmentFiles[0].endsWith("_0.json")) {
-                    this.currentSegmentIndex = 0;
-                } else if (this.currentSegmentIndex === -1) {
-                    // Эта ситуация маловероятна, если _getActualSegmentFiles возвращает отсортированные .json файлы
-                    console.warn(`WiseJSON WARN (_initializeAndRecover): Не удалось определить currentSegmentIndex для коллекции "${this.collectionName}" из файлов: ${segmentFiles.join(', ')}. Установка в 0.`);
-                    this.currentSegmentIndex = 0;
+                const determinedIndex = this._getSegmentIndexFromName(lastSegmentName);
+
+                if (determinedIndex === -1) {
+                    // Эта ситуация маловероятна, если _getActualSegmentFiles возвращает корректно отсортированные и отфильтрованные .json файлы.
+                    // Может произойти, если имя последнего файла сегмента как-то повреждено, но все же прошло через фильтры.
+                    console.warn(`WiseJSON WARN (_initializeAndRecover): Не удалось определить currentSegmentIndex для коллекции "${this.collectionName}" из последнего файла сегмента "${lastSegmentName}". Файлы в директории: ${segmentFiles.join(', ')}. Устанавливается индекс 0.`);
+                    this.currentSegmentIndex = 0; 
+                } else {
+                    this.currentSegmentIndex = determinedIndex;
                 }
             } else {
                 // Коллекция пуста (или все сегменты были невалидны и удалены при восстановлении).
@@ -79,7 +82,7 @@ class Collection {
         try {
             filesInDir = await fs.readdir(this.collectionDirectoryPath);
         } catch (e) {
-            if (e.code === 'ENOENT') return; // Директории нет, нечего восстанавливать
+            if (e.code === 'ENOENT') return; 
             console.error(`WiseJSON RECOVERY: Ошибка чтения директории "${this.collectionDirectoryPath}" при восстановлении: ${e.message}`);
             throw e;
         }
@@ -168,8 +171,6 @@ class Collection {
                 });
         } catch (error) {
             if (error.code === 'ENOENT') return []; 
-            // Если директории нет, _initializeAndRecover ее создаст.
-            // Но если она исчезла после инициализации, это проблема.
             console.error(`WiseJSON ERROR (_getActualSegmentFiles): Ошибка чтения директории "${this.collectionDirectoryPath}": ${error.message}`);
             throw error;
         }
@@ -183,9 +184,7 @@ class Collection {
         } catch (error) {
             if (error.code === 'ENOENT') return []; 
             const userFriendlyMessage = `WiseJSON: Сегмент "${segmentPath}" поврежден или нечитаем. (Исходная ошибка: ${error.message})`;
-            // Ошибка уже будет залогирована в _isValidJsonFile, если она вызвана оттуда.
-            // Если вызвана напрямую, и это ошибка парсинга, логируем здесь.
-            if (!(error.message.includes("поврежден или нечитаем"))) { // Предотвращаем двойное логирование
+            if (!(error.message.includes("поврежден или нечитаем"))) {
                  console.error(userFriendlyMessage, error.stack);
             }
             throw new Error(userFriendlyMessage);
@@ -212,7 +211,7 @@ class Collection {
                     await fs.rename(segmentPath, bakPath);
                 } catch (bakError) {
                     console.error(`WiseJSON WRITE ERROR: Ошибка создания .bak для "${segmentPath}": ${bakError.message}. Откат: удаление ${newPath}.`);
-                    try { await fs.unlink(newPath); } catch {} // Попытка удалить .new
+                    try { await fs.unlink(newPath); } catch {} 
                     throw bakError;
                 }
             }
@@ -226,8 +225,7 @@ class Collection {
                         if(await this._pathExists(segmentPath) && !(await this._isValidJsonFile(segmentPath))) {
                              try { await fs.unlink(segmentPath); } catch (e) { if (e.code !== 'ENOENT') console.error(`WiseJSON WRITE WARN: Не удалось удалить ${segmentPath} перед восстановлением .bak`, e.message); }
                         } else if (await this._pathExists(segmentPath)) {
-                            // Основной файл существует и, возможно, валиден (если rename .new упал не из-за этого)
-                            // Не будем его удалять, если он не был целью переименования из .new
+                            // Do nothing, main file might be ok
                         }
                         await fs.rename(bakPath, segmentPath); 
                         console.warn(`WiseJSON WRITE: Успешно восстановлен .bak для "${segmentPath}".`);
@@ -244,7 +242,6 @@ class Collection {
             }
             return Buffer.byteLength(jsonData, 'utf8');
         } catch (error) {
-            // Пытаемся удалить .new, если он мог остаться и ошибка не связана с его удалением
             if (await this._pathExists(newPath) && (error.path !== newPath || (error.syscall && error.syscall !== 'unlink'))) {
                  try { await fs.unlink(newPath); } catch {}
             }
@@ -255,7 +252,6 @@ class Collection {
     _enqueueWriteOperation(operationFn) {
         const operationPromise = this.writeQueue
             .catch(prevErrInQueue => {
-                // Оставляем это предупреждение, оно может быть полезно для диагностики проблем с очередью
                 console.warn(`WiseJSON Info: Предыдущая операция в очереди для "${this.collectionName}" завершилась с ошибкой: ${prevErrInQueue.message}. Запускаем следующую...`);
                 return Promise.resolve(); 
             })
@@ -314,7 +310,6 @@ class Collection {
             createdAt: itemDataToInsert.createdAt || new Date().toISOString(),
             updatedAt: itemDataToInsert.updatedAt || new Date().toISOString(),
         };
-        // Гарантируем, что системные поля точно установлены
         newItem._id = newItem._id; 
         newItem.createdAt = newItem.createdAt;
         newItem.updatedAt = newItem.updatedAt;
@@ -333,7 +328,7 @@ class Collection {
             const isFirstWriteToFile = this.currentSegmentIndex === 0 && isCurrentSegmentEmpty;
             await this._writeSegmentDataInternal(this.currentSegmentIndex, currentSegmentData, isFirstWriteToFile);
         }
-        this._emit('afterInsert', { ...newItem }); // Эмитируем копию
+        this._emit('afterInsert', { ...newItem });
         return newItem;
     }
 
@@ -357,13 +352,19 @@ class Collection {
                 };
                 segmentData[itemIndex] = updatedItem;
                 await this._writeSegmentDataInternal(segmentIndex, segmentData, false);
-                this._emit('afterUpdate', { ...updatedItem }, originalDocumentSnapshot); // Эмитируем копии
+                this._emit('afterUpdate', { ...updatedItem }, originalDocumentSnapshot);
                 return updatedItem;
             }
         }
         return null;
     }
 
+    /**
+     * Вставляет новый документ в коллекцию.
+     * Поля `_id`, `createdAt`, `updatedAt` будут автоматически сгенерированы/перезаписаны.
+     * @param {object} itemData - Данные для нового документа.
+     * @returns {Promise<object>} - Вставленный документ.
+     */
     async insert(itemData) {
         const cleanItemData = { ...itemData };
         delete cleanItemData._id; 
@@ -372,6 +373,10 @@ class Collection {
         return this._enqueueWriteOperation(() => this._rawInsert(cleanItemData));
     }
 
+    /**
+     * Получает все документы из коллекции.
+     * @returns {Promise<object[]>} - Массив всех документов.
+     */
     async getAll() {
         await this._ensureInitialized();
         const allItems = [];
@@ -385,6 +390,11 @@ class Collection {
         return allItems;
     }
 
+    /**
+     * Находит все документы, удовлетворяющие функции-запросу.
+     * @param {function(object):boolean} queryFunction - Функция, принимающая документ и возвращающая true, если он соответствует условию.
+     * @returns {Promise<object[]>} - Массив найденных документов.
+     */
     async find(queryFunction) {
         if (typeof queryFunction !== 'function') {
             throw new Error("WiseJSON: queryFunction для find должен быть функцией.");
@@ -393,6 +403,11 @@ class Collection {
         return allItems.filter(queryFunction);
     }
 
+    /**
+     * Находит первый документ, удовлетворяющий функции-запросу.
+     * @param {function(object):boolean} queryFunction - Функция, принимающая документ и возвращающая true, если он соответствует условию.
+     * @returns {Promise<object|null>} - Найденный документ или null.
+     */
     async findOne(queryFunction) {
         if (typeof queryFunction !== 'function') {
             throw new Error("WiseJSON: queryFunction для findOne должен быть функцией.");
@@ -412,6 +427,11 @@ class Collection {
         return null;
     }
 
+    /**
+     * Находит документ по его уникальному идентификатору `_id`.
+     * @param {string} id - Уникальный идентификатор документа.
+     * @returns {Promise<object|null>} - Найденный документ или null.
+     */
     async getById(id) {
         if (!id || typeof id !== 'string') {
             throw new Error("WiseJSON: ID для getById должен быть непустой строкой.");
@@ -419,6 +439,13 @@ class Collection {
         return this.findOne(item => item._id === id);
     }
 
+    /**
+     * Обновляет документ с указанным `_id`.
+     * Поля `_id` и `createdAt` не изменяются. `updatedAt` обновляется автоматически.
+     * @param {string} id - `_id` документа для обновления.
+     * @param {object} updates - Объект с полями для обновления.
+     * @returns {Promise<object|null>} - Обновленный документ или null, если документ не найден.
+     */
     async update(id, updates) {
         const cleanUpdates = { ...updates };
         if (cleanUpdates._id && cleanUpdates._id !== id) {
@@ -429,6 +456,11 @@ class Collection {
         return this._enqueueWriteOperation(() => this._rawUpdate(id, cleanUpdates));
     }
 
+    /**
+     * Удаляет документ с указанным `_id`.
+     * @param {string} id - `_id` документа для удаления.
+     * @returns {Promise<boolean>} - `true`, если документ был удален, иначе `false`.
+     */
     async remove(id) {
         return this._enqueueWriteOperation(async () => {
             if (!id || typeof id !== 'string') {
@@ -461,6 +493,11 @@ class Collection {
         });
     }
 
+    /**
+     * Подсчитывает количество документов в коллекции.
+     * @param {function(object):boolean} [queryFunction] - Необязательная функция-фильтр. Если предоставлена, подсчитываются только соответствующие документы.
+     * @returns {Promise<number>} - Количество документов.
+     */
     async count(queryFunction) {
         await this._ensureInitialized();
         let documentCount = 0;
@@ -483,6 +520,14 @@ class Collection {
         return documentCount;
     }
 
+    /**
+     * Обновляет документ, если он найден по `query`, иначе вставляет новый документ.
+     * @param {object|function(object):boolean} query - Объект для точного поиска или функция-предикат.
+     * @param {object} dataToUpsert - Данные для вставки или обновления.
+     * @param {object} [options] - Дополнительные опции.
+     * @param {object} [options.setOnInsert] - Данные, применяемые только при вставке нового документа.
+     * @returns {Promise<{document: object, operation: 'inserted' | 'updated'}>} - Результат операции.
+     */
     async upsert(query, dataToUpsert, options = {}) {
         return this._enqueueWriteOperation(async () => {
             if (!query || (typeof query !== 'object' && typeof query !== 'function')) {
@@ -505,19 +550,67 @@ class Collection {
                 return { document: updatedDocument, operation: 'updated' };
             } else {
                 let documentToInsert = {};
-                if (typeof query === 'object' && query !== null) {
+                if (typeof query === 'object' && query !== null && Object.keys(query).length > 0) { // Убедимся, что query - это непустой объект, если он не функция
                     documentToInsert = { ...query };
                 }
                 documentToInsert = { ...documentToInsert, ...dataToUpsert };
                 if (options.setOnInsert && typeof options.setOnInsert === 'object') {
-                    documentToInsert = { ...documentToInsert, ...options.setOnInsert };
+                    documentToInsert = { ...options.setOnInsert, ...documentToInsert }; // setOnInsert может перезаписать поля из dataToUpsert/query, если они совпадают, или наоборот. Логично, если setOnInsert имеет приоритет для новых полей. Или { ...documentToInsert, ...options.setOnInsert }
                 }
+                // Обеспечим, что setOnInsert не перезапишет _id, если он был в query
+                const finalId = documentToInsert._id || (query && typeof query === 'object' ? query._id : undefined);
+
                 delete documentToInsert.createdAt; 
                 delete documentToInsert.updatedAt;
+                // Если _id пришел из query, он уже в documentToInsert. Если нет, _rawInsert сгенерирует.
+                // Если _id был в dataToUpsert, он также будет там.
+                // Если _id был в setOnInsert, он будет там. _rawInsert все равно сгенерирует свой, если не найдет.
+                // Чтобы гарантировать, что ID из query (если это объект-запрос с _id) используется, или из dataToUpsert (если есть)
+                // или из setOnInsert (если есть и это не функция-запрос) - нужно аккуратно смержить.
+                // Текущая логика _rawInsert: itemDataToInsert._id || this.options.idGenerator().
+                // Если в documentToInsert есть _id, он будет использован.
+
+                if (finalId) documentToInsert._id = finalId;
+
+
                 const insertedDocument = await this._rawInsert(documentToInsert); 
                 return { document: insertedDocument, operation: 'inserted' };
             }
         });
+    }
+
+    /**
+     * Получает статистику по коллекции.
+     * @returns {Promise<{documentCount: number, segmentCount: number, totalDiskSizeBytes: number, options: object}>} Статистика коллекции.
+     */
+    async getCollectionStats() {
+        await this._ensureInitialized();
+
+        const segmentFiles = await this._getActualSegmentFiles();
+        const segmentCount = segmentFiles.length;
+        let totalDiskSizeBytes = 0;
+        let documentCount = 0; // Используем this.count() для точности с возможным queryFunction в будущем, но здесь нужен общий подсчет
+
+        for (const segmentFileName of segmentFiles) {
+            const segmentPath = path.join(this.collectionDirectoryPath, segmentFileName);
+            try {
+                const stats = await fs.stat(segmentPath);
+                totalDiskSizeBytes += stats.size;
+            } catch (error) {
+                console.warn(`WiseJSON WARN (getCollectionStats): Не удалось получить размер для сегмента "${segmentPath}": ${error.message}`);
+            }
+        }
+        
+        // Для documentCount, мы можем либо пересчитать, либо вызвать this.count()
+        // Вызов this.count() проще и использует уже существующую логику.
+        documentCount = await this.count(); 
+
+        return {
+            documentCount,
+            segmentCount,
+            totalDiskSizeBytes,
+            options: { ...this.options } // Возвращаем копию опций
+        };
     }
 }
 
