@@ -6,7 +6,8 @@ const { ensureDirectoryExists, writeJsonFileSafe, readJsonFile, pathExists } = r
 const CHECKPOINT_DIR_NAME = '_checkpoints';
 const CHECKPOINT_META_FILE_PREFIX = 'checkpoint_meta_';
 const CHECKPOINT_DATA_FILE_PREFIX = 'checkpoint_data_';
-const TEMP_CHECKPOINT_META_SUFFIX = '.tmp_meta'; // Для временного мета-файла
+const TEMP_CHECKPOINT_META_SUFFIX = '.tmp_meta'; // Для временного мета-файла при создании
+const TEMP_CHECKPOINT_DATA_SUFFIX = '.tmp_data'; // Для временных файлов сегментов при создании
 
 /**
  * Возвращает стандартный путь к директории чекпоинтов для коллекции.
@@ -19,9 +20,9 @@ function getCheckpointsPath(collectionDirPath) {
 
 /**
  * Выполняет чекпоинт: сохраняет текущее состояние документов на диск.
- * Сначала записывает все файлы данных, затем временный мета-файл,
- * и только после этого переименовывает временный мета-файл в основной,
- * делая чекпоинт "видимым" и валидным.
+ * Сначала записывает все файлы данных во временные имена, затем временный мета-файл.
+ * После успешной записи всех временных файлов, файлы данных переименовываются в финальные,
+ * и затем временный мета-файл переименовывается в основной, делая чекпоинт "видимым".
  * @param {string} checkpointsDirPath - Путь к директории, где хранятся чекпоинты.
  * @param {string} collectionName - Имя коллекции (для именования файлов).
  * @param {Map<string, object>} documents - Данные коллекции (Map документов).
@@ -38,7 +39,10 @@ async function performCheckpoint(checkpointsDirPath, collectionName, documents, 
         ? options.maxSegmentSizeBytes 
         : (1 * 1024 * 1024); 
 
-    const checkpointDataFileNames = []; 
+    const finalDataFileNames = []; // Финальные имена файлов данных
+    const tempSegmentFilePaths = [];   // Полные пути к временным файлам сегментов
+    const finalSegmentFilePaths = [];  // Полные пути к финальным файлам сегментов
+
     const docsArray = Array.from(documents.values());
     let currentSegmentDocs = [];
     let currentSegmentJsonLength = 2; 
@@ -47,10 +51,9 @@ async function performCheckpoint(checkpointsDirPath, collectionName, documents, 
     const finalMetaFileName = `${CHECKPOINT_META_FILE_PREFIX}${collectionName}_${sanitizedTs}.json`;
     const tempMetaFilePath = path.join(checkpointsDirPath, `${finalMetaFileName}${TEMP_CHECKPOINT_META_SUFFIX}`);
     const finalMetaFilePath = path.join(checkpointsDirPath, finalMetaFileName);
-
-    let createdSegmentPaths = []; // Для отката в случае ошибки
-
+    
     try {
+        // 1. Записываем все сегменты данных во временные файлы
         for (let i = 0; i < docsArray.length; i++) {
             const doc = docsArray[i];
             const docJsonString = JSON.stringify(doc); 
@@ -58,13 +61,13 @@ async function performCheckpoint(checkpointsDirPath, collectionName, documents, 
             const estimatedAddedLength = docByteLength + (currentSegmentDocs.length > 0 ? 1 : 0);
 
             if (currentSegmentJsonLength + estimatedAddedLength > maxSegmentSizeBytes && currentSegmentDocs.length > 0) {
-                const segmentFileName = `${CHECKPOINT_DATA_FILE_PREFIX}${collectionName}_${sanitizedTs}_seg${checkpointDataFileNames.length}.json`;
-                const segmentFilePath = path.join(checkpointsDirPath, segmentFileName);
-                // Сегменты пишем сразу с финальными именами, т.к. их валидность будет определяться мета-файлом.
-                // writeJsonFileSafe использует временный файл для записи каждого сегмента.
-                await writeJsonFileSafe(segmentFilePath, currentSegmentDocs, jsonDataIndent);
-                checkpointDataFileNames.push(segmentFileName);
-                createdSegmentPaths.push(segmentFilePath);
+                const segmentBaseName = `${CHECKPOINT_DATA_FILE_PREFIX}${collectionName}_${sanitizedTs}_seg${finalDataFileNames.length}.json`;
+                const tempSegmentPath = path.join(checkpointsDirPath, `${segmentBaseName}${TEMP_CHECKPOINT_DATA_SUFFIX}`);
+                await writeJsonFileSafe(tempSegmentPath, currentSegmentDocs, jsonDataIndent); // writeJsonFileSafe сама использует .tmp
+                
+                finalDataFileNames.push(segmentBaseName);
+                tempSegmentFilePaths.push(tempSegmentPath);
+                finalSegmentFilePaths.push(path.join(checkpointsDirPath, segmentBaseName));
                 
                 currentSegmentDocs = []; 
                 currentSegmentJsonLength = 2;
@@ -74,63 +77,78 @@ async function performCheckpoint(checkpointsDirPath, collectionName, documents, 
         }
 
         if (currentSegmentDocs.length > 0) {
-            const segmentFileName = `${CHECKPOINT_DATA_FILE_PREFIX}${collectionName}_${sanitizedTs}_seg${checkpointDataFileNames.length}.json`;
-            const segmentFilePath = path.join(checkpointsDirPath, segmentFileName);
-            await writeJsonFileSafe(segmentFilePath, currentSegmentDocs, jsonDataIndent);
-            checkpointDataFileNames.push(segmentFileName);
-            createdSegmentPaths.push(segmentFilePath);
-        } else if (docsArray.length === 0 && checkpointDataFileNames.length === 0) { 
-            const segmentFileName = `${CHECKPOINT_DATA_FILE_PREFIX}${collectionName}_${sanitizedTs}_seg0.json`;
-            const segmentFilePath = path.join(checkpointsDirPath, segmentFileName);
-            await writeJsonFileSafe(segmentFilePath, [], jsonDataIndent); 
-            checkpointDataFileNames.push(segmentFileName);
-            createdSegmentPaths.push(segmentFilePath);
+            const segmentBaseName = `${CHECKPOINT_DATA_FILE_PREFIX}${collectionName}_${sanitizedTs}_seg${finalDataFileNames.length}.json`;
+            const tempSegmentPath = path.join(checkpointsDirPath, `${segmentBaseName}${TEMP_CHECKPOINT_DATA_SUFFIX}`);
+            await writeJsonFileSafe(tempSegmentPath, currentSegmentDocs, jsonDataIndent);
+            
+            finalDataFileNames.push(segmentBaseName);
+            tempSegmentFilePaths.push(tempSegmentPath);
+            finalSegmentFilePaths.push(path.join(checkpointsDirPath, segmentBaseName));
+        } else if (docsArray.length === 0 && finalDataFileNames.length === 0) { 
+            const segmentBaseName = `${CHECKPOINT_DATA_FILE_PREFIX}${collectionName}_${sanitizedTs}_seg0.json`;
+            const tempSegmentPath = path.join(checkpointsDirPath, `${segmentBaseName}${TEMP_CHECKPOINT_DATA_SUFFIX}`);
+            await writeJsonFileSafe(tempSegmentPath, [], jsonDataIndent); 
+            
+            finalDataFileNames.push(segmentBaseName);
+            tempSegmentFilePaths.push(tempSegmentPath);
+            finalSegmentFilePaths.push(path.join(checkpointsDirPath, segmentBaseName));
         }
 
-        // Все сегменты данных успешно записаны. Теперь создаем мета-файл.
+        // 2. Все сегменты данных успешно записаны во временные файлы. Создаем мета-файл.
         const checkpointMeta = {
             timestamp: checkpointTs, 
             collectionName: collectionName,
-            segmentFiles: checkpointDataFileNames, 
+            segmentFiles: finalDataFileNames, // Мета-файл ссылается на финальные имена сегментов
             totalDocuments: docsArray.length,
         };
         
-        // Сначала пишем метаданные во временный файл
+        // Пишем метаданные во временный мета-файл
         await writeJsonFileSafe(tempMetaFilePath, checkpointMeta, jsonDataIndent);
 
-        // Атомарно "публикуем" чекпоинт, переименовывая временный мета-файл в основной
+        // 3. Атомарно "публикуем" чекпоинт:
+        //    Сначала переименовываем все временные файлы данных в финальные.
+        for (let i = 0; i < tempSegmentFilePaths.length; i++) {
+            await fs.rename(tempSegmentFilePaths[i], finalSegmentFilePaths[i]);
+        }
+        
+        //    Затем переименовываем временный мета-файл в основной. Это делает чекпоинт "видимым".
         await fs.rename(tempMetaFilePath, finalMetaFilePath);
         
-        console.log(`CheckpointManager: Чекпоинт для "${collectionName}" (ts: ${checkpointTs}) успешно создан и опубликован. Мета: ${finalMetaFileName}. Сегменты: ${checkpointDataFileNames.length}`);
-        return { ...checkpointMeta, metaFile: finalMetaFileName };
+        console.log(`CheckpointManager: Чекпоинт для "${collectionName}" (ts: ${checkpointTs}) успешно создан и опубликован. Мета: ${finalMetaFileName}. Сегменты: ${finalDataFileNames.length}`);
+        return { ...checkpointMeta, metaFile: finalMetaFileName }; // Возвращаем финальное имя мета-файла
+
     } catch (error) {
-        // Если произошла ошибка на любом этапе, пытаемся удалить все созданные файлы этого чекпоинта
         console.error(`CheckpointManager: Ошибка при создании чекпоинта (ts: ${checkpointTs}) для "${collectionName}": ${error.message}. Попытка отката...`);
-        for (const fp of createdSegmentPaths) {
+        // Пытаемся удалить все созданные временные файлы этого чекпоинта
+        for (const fp of tempSegmentFilePaths) { // Удаляем временные сегменты
             try {
                 if (await pathExists(fp)) await fs.unlink(fp);
             } catch (unlinkErr) {
                 console.warn(`CheckpointManager: Не удалось удалить временный файл сегмента "${fp}" при откате: ${unlinkErr.message}`);
             }
         }
-        // Удаляем временный мета-файл, если он был создан
-        try {
+        // Удаляем также финальные сегменты, если они успели создаться до ошибки перед записью мета (маловероятно при текущей логике)
+        for (const fp of finalSegmentFilePaths) {
+             try {
+                if (await pathExists(fp)) await fs.unlink(fp);
+            } catch (unlinkErr) { /* уже не так критично */ }
+        }
+        try { // Удаляем временный мета-файл
             if (await pathExists(tempMetaFilePath)) await fs.unlink(tempMetaFilePath);
         } catch (unlinkErr) {
              console.warn(`CheckpointManager: Не удалось удалить временный мета-файл "${tempMetaFilePath}" при откате: ${unlinkErr.message}`);
         }
-        // Перебрасываем исходную ошибку
-        throw error;
+        throw error; // Перебрасываем исходную ошибку
     }
 }
 
 /**
  * Загружает данные из последнего валидного чекпоинта.
- * Валидным считается чекпоинт, у которого существует финальный мета-файл и все указанные в нем сегменты.
+ * Валидным считается чекпоинт, у которого существует финальный (не *.tmp_meta) мета-файл
+ * и все указанные в нем файлы-сегменты данных существуют и читаемы.
  * @param {string} checkpointsDirPath - Путь к директории чекпоинтов.
  * @param {string} collectionName - Имя коллекции.
  * @returns {Promise<{documents: Map<string, object>, timestamp: string | null, metaFile: string | null}>}
- *          Объект с картой документов, временной меткой чекпоинта и именем мета-файла (или null, если чекпоинтов нет).
  */
 async function loadLatestCheckpoint(checkpointsDirPath, collectionName) {
     const loadedDocuments = new Map();
@@ -150,7 +168,6 @@ async function loadLatestCheckpoint(checkpointsDirPath, collectionName) {
         return { documents: loadedDocuments, timestamp: latestCheckpointTimestamp, metaFile: loadedMetaFile };
     }
     
-    // Ищем только финальные мета-файлы (без .tmp_meta)
     const finalMetaFileNames = filesInDir
         .filter(f => f.startsWith(`${CHECKPOINT_META_FILE_PREFIX}${collectionName}_`) && f.endsWith('.json') && !f.endsWith(TEMP_CHECKPOINT_META_SUFFIX))
         .sort()  
@@ -182,7 +199,7 @@ async function loadLatestCheckpoint(checkpointsDirPath, collectionName) {
                 // Валидный пустой чекпоинт
             } else if (checkpointMeta.segmentFiles.length > 0) {
                 for (const segmentFileName of checkpointMeta.segmentFiles) {
-                    const segmentFilePath = path.join(checkpointsDirPath, segmentFileName);
+                    const segmentFilePath = path.join(checkpointsDirPath, segmentFileName); // Сегменты должны иметь финальные имена
                     if (!(await pathExists(segmentFilePath))) {
                         console.error(`CheckpointManager: Файл сегмента "${segmentFileName}" (из мета "${metaFileName}") не найден. Чекпоинт "${metaFileName}" невалиден.`);
                         allSegmentsValidAndPresent = false;
@@ -252,13 +269,12 @@ async function cleanupOldCheckpoints(checkpointsDirPath, collectionName, numToKe
         return;
     }
 
-    // Ищем только финальные (не .tmp_meta) мета-файлы для этой коллекции
     const finalMetaFileNamesSorted = filesInDir
         .filter(f => f.startsWith(`${CHECKPOINT_META_FILE_PREFIX}${collectionName}_`) && f.endsWith('.json') && !f.endsWith(TEMP_CHECKPOINT_META_SUFFIX))
         .sort(); 
 
     if (finalMetaFileNamesSorted.length <= numToKeep) {
-        return; // Нечего удалять
+        return; 
     }
 
     const metaFilesToDelete = finalMetaFileNamesSorted.slice(0, finalMetaFileNamesSorted.length - numToKeep);
@@ -270,10 +286,8 @@ async function cleanupOldCheckpoints(checkpointsDirPath, collectionName, numToKe
     for (const metaFileName of metaFilesToDelete) {
         const metaFilePath = path.join(checkpointsDirPath, metaFileName);
         try {
-            // Сначала пытаемся прочитать мета-файл, чтобы получить список его сегментов
-            // Если мета-файл уже удален или поврежден, мы не можем надежно удалить его сегменты по имени.
             let segmentFilesToDelete = [];
-            if (await pathExists(metaFilePath)) {
+            if (await pathExists(metaFilePath)) { // Проверяем существование мета-файла перед чтением
                 try {
                     const checkpointMeta = await readJsonFile(metaFilePath); 
                     if (checkpointMeta && Array.isArray(checkpointMeta.segmentFiles)) {
@@ -286,12 +300,11 @@ async function cleanupOldCheckpoints(checkpointsDirPath, collectionName, numToKe
                 }
             } else {
                 console.warn(`CheckpointManager: Мета-файл для удаления "${metaFileName}" не найден во время очистки. Возможно, уже удален.`);
-                continue; // Переходим к следующему мета-файлу для удаления
+                continue; 
             }
             
-            // Удаляем сегменты
             for (const segmentFileName of segmentFilesToDelete) {
-                const segmentFilePath = path.join(checkpointsDirPath, segmentFileName);
+                const segmentFilePath = path.join(checkpointsDirPath, segmentFileName); // Имена сегментов в мета уже финальные
                 if (await pathExists(segmentFilePath)) {
                     try {
                         await fs.unlink(segmentFilePath);
@@ -301,12 +314,11 @@ async function cleanupOldCheckpoints(checkpointsDirPath, collectionName, numToKe
                 }
             }
 
-            // Удаляем сам мета-файл
-            if (await pathExists(metaFilePath)) {
-                await fs.unlink(metaFilePath);
-                console.log(`CheckpointManager: Удален старый чекпоинт (мета: ${metaFileName}) для "${collectionName}".`);
+            if (await pathExists(metaFilePath)) { // Еще раз проверяем перед удалением самого мета-файла
+                 await fs.unlink(metaFilePath);
+                 console.log(`CheckpointManager: Удален старый чекпоинт (мета: ${metaFileName}) для "${collectionName}".`);
             }
-        } catch (error) { // Общий catch для ошибок обработки одного старого чекпоинта
+        } catch (error) { 
             console.error(`CheckpointManager: Общая ошибка при удалении старого чекпоинта (обработка мета-файла "${metaFileName}"): ${error.message}`);
         }
     }

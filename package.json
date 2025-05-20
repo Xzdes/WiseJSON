@@ -1,8 +1,8 @@
 {
   "name": "wise-json-db",
-  "version": "2.1.0", 
+  "version": "2.1.0",
   "description": "Легковесная, встраиваемая JSON база данных на чистом JavaScript для Node.js, с сегментацией и надежной записью.",
-  "main": "wise-json/index.js", 
+  "main": "wise-json/index.js",
   "scripts": {
     "test": "node test/advanced-test-wise-json.js"
   },
@@ -22,19 +22,18 @@
   ],
   "author": "Xzdes <xzdes@yandex.ru>",
   "license": "MIT",
-  "bugs": { 
+  "bugs": {
     "url": "https://github.com/Xzdes/WiseJSON/issues"
   },
-  "homepage": "https://github.com/Xzdes/WiseJSON#readme", 
+  "homepage": "https://github.com/Xzdes/WiseJSON#readme",
   "dependencies": {
+    "uuid": "^11.1.0"
   },
-  "devDependencies": { 
-  },
-  "files": [ 
+  "files": [
     "wise-json/",
     "README.md"
   ],
-  "engines": { 
+  "engines": {
     "node": ">=14.0.0"
   }
 }
