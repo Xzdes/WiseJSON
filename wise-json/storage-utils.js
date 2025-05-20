@@ -1,112 +1,121 @@
-// wise-json/storage-utils.js
+// storage-utils.js
 const fs = require('fs/promises');
-const path = require('path'); // path не используется в текущих функциях, но может понадобиться для будущих утилит
+const path = require('path');
 
 /**
- * Гарантирует существование директории. Если она не существует, создает ее.
- * Включает опцию `recursive: true` для создания вложенных директорий.
- * @param {string} dirPath - Путь к директории.
- * @returns {Promise<void>}
- * @throws {Error} Если не удалось создать директорию (кроме случая, когда она уже существует).
- */
-async function ensureDirectoryExists(dirPath) {
-    try {
-        await fs.mkdir(dirPath, { recursive: true });
-    } catch (error) {
-        // fs.mkdir с recursive: true не бросает ошибку, если директория уже существует (EEXIST).
-        // Поэтому ловим только другие возможные ошибки.
-        if (error.code !== 'EEXIST') {
-            const errorMessage = `StorageUtils: Не удалось создать или проверить директорию "${dirPath}": ${error.message}`;
-            console.error(errorMessage, error.stack);
-            throw new Error(errorMessage); // Перебрасываем для обработки выше
-        }
-        // Если EEXIST, то все в порядке, директория существует.
-    }
-}
-
-/**
- * Проверяет, существует ли путь (файл или директория) в файловой системе.
- * @param {string} filePath - Путь к файлу или директории.
- * @returns {Promise<boolean>} true, если путь существует, иначе false.
+ * Проверяет, существует ли указанный путь (файл или директория).
+ * @param {string} filePath
+ * @returns {Promise<boolean>}
  */
 async function pathExists(filePath) {
     try {
-        await fs.access(filePath); // Проверяет доступность файла/директории
+        await fs.access(filePath);
         return true;
-    } catch (error) {
-        // Если fs.access бросает ошибку (обычно ENOENT), значит путь не существует или недоступен
-        if (error.code === 'ENOENT') {
-            return false;
-        }
-        // Для других ошибок доступа (например, EACCES), мы также считаем, что путь "не существует"
-        // с точки зрения возможности работы с ним, или можно перебросить ошибку, если нужна гранулярность.
-        // Пока что для простоты возвращаем false.
-        console.warn(`StorageUtils: Ошибка доступа к пути "${filePath}" (код: ${error.code}), считаем, что путь не существует.`);
+    } catch (err) {
+        if (err.code === 'ENOENT') return false;
+        console.warn(`[StorageUtils] Предупреждение: путь "${filePath}" не доступен (${err.code}).`);
         return false;
     }
 }
 
 /**
- * Безопасно записывает данные в JSON-файл.
- * Сначала данные записываются во временный файл, а затем временный файл
- * атомарно (на большинстве файловых систем) переименовывается в основной.
- * Это предотвращает повреждение основного файла в случае сбоя во время записи.
- * @param {string} filePath - Конечный путь к JSON-файлу.
- * @param {any} data - Данные для сериализации в JSON и записи.
- * @param {number|null} [jsonIndent=null] - Отступ для функции JSON.stringify.
- *                                          Передайте `null` или `0` для компактного вывода без отступов.
+ * Создаёт директорию, если она не существует.
+ * @param {string} dirPath
  * @returns {Promise<void>}
- * @throws {Error} Если произошла ошибка на любом этапе записи или переименования.
  */
-async function writeJsonFileSafe(filePath, data, jsonIndent = null) {
-    // Генерируем уникальное имя для временного файла в той же директории
-    const tempFilePath = `${filePath}.${Date.now()}-${Math.random().toString(36).substring(2, 9)}.tmp`;
-    
+async function ensureDirectoryExists(dirPath) {
     try {
-        const jsonData = JSON.stringify(data, null, jsonIndent);
-        await fs.writeFile(tempFilePath, jsonData, 'utf-8');
-        await fs.rename(tempFilePath, filePath); // Атомарное переименование
-    } catch (error) {
-        // Если произошла ошибка, пытаемся удалить временный файл, если он был создан
-        if (await pathExists(tempFilePath)) {
-            try {
-                await fs.unlink(tempFilePath);
-            } catch (unlinkError) {
-                // Логируем ошибку удаления временного файла, но не маскируем основную ошибку
-                console.error(`StorageUtils: Не удалось удалить временный файл "${tempFilePath}" после ошибки записи в "${filePath}": ${unlinkError.message}`);
-            }
+        await fs.mkdir(dirPath, { recursive: true });
+    } catch (err) {
+        if (err.code !== 'EEXIST') {
+            console.error(`[StorageUtils] Ошибка создания директории "${dirPath}": ${err.message}`);
+            throw err;
         }
-        const errorMessage = `StorageUtils: Ошибка безопасной записи JSON в файл "${filePath}": ${error.message}`;
-        console.error(errorMessage, error.stack);
-        throw new Error(errorMessage); // Перебрасываем основную ошибку
     }
 }
 
 /**
- * Читает и парсит JSON-файл.
- * @param {string} filePath - Путь к JSON-файлу.
- * @returns {Promise<any|null>} Распарсенные данные (объект или массив) или `null`, если файл не найден.
- * @throws {Error} Если файл существует, но содержит невалидный JSON или произошла другая ошибка чтения (кроме ENOENT).
+ * Безопасно записывает JSON в файл.
+ * Пишет сначала во временный `.tmp` файл, затем переименовывает.
+ * Это защищает от порчи данных при сбое.
+ * @param {string} filePath - путь к финальному JSON-файлу
+ * @param {any} data - данные для записи
+ * @param {number|null} [jsonIndent=null] - отступ в JSON или null
+ * @returns {Promise<void>}
  */
-async function readJsonFile(filePath) {
+async function writeJsonFileSafe(filePath, data, jsonIndent = null) {
+    const tmpName = `${Date.now()}-${Math.random().toString(36).substring(2, 10)}.tmp`;
+    const tmpPath = `${filePath}.${tmpName}`;
+
     try {
-        const fileContent = await fs.readFile(filePath, 'utf-8');
-        return JSON.parse(fileContent);
-    } catch (error) {
-        if (error.code === 'ENOENT') {
-            return null; // Файл не найден - это ожидаемый сценарий, возвращаем null
+        const json = JSON.stringify(data, null, jsonIndent);
+        await fs.writeFile(tmpPath, json, 'utf-8');
+        await fs.rename(tmpPath, filePath);
+    } catch (err) {
+        console.error(`[StorageUtils] Ошибка записи JSON в "${filePath}": ${err.message}`);
+        if (await pathExists(tmpPath)) {
+            try {
+                await fs.unlink(tmpPath);
+            } catch (unlinkErr) {
+                console.warn(`[StorageUtils] Не удалось удалить tmp-файл "${tmpPath}": ${unlinkErr.message}`);
+            }
         }
-        // Для других ошибок (например, SyntaxError при JSON.parse или EACCES при readFile)
-        const errorMessage = `StorageUtils: Ошибка чтения или парсинга JSON-файла "${filePath}": ${error.message}`;
-        console.error(errorMessage, error.stack);
-        throw new Error(errorMessage); // Перебрасываем ошибку
+        throw err;
     }
 }
 
-// Экспортируем функции для использования в других модулях
+/**
+ * Читает JSON-файл с диска и парсит его.
+ * @param {string} filePath
+ * @returns {Promise<any|null>}
+ */
+async function readJsonFile(filePath) {
+    try {
+        const raw = await fs.readFile(filePath, 'utf-8');
+        return JSON.parse(raw);
+    } catch (err) {
+        if (err.code === 'ENOENT') return null;
+        console.error(`[StorageUtils] Ошибка чтения JSON-файла "${filePath}": ${err.message}`);
+        throw err;
+    }
+}
+
+/**
+ * Копирует файл (например, для создания резервной копии).
+ * Если dst уже существует — перезаписывает.
+ * @param {string} src
+ * @param {string} dst
+ * @returns {Promise<void>}
+ */
+async function copyFileSafe(src, dst) {
+    try {
+        await fs.copyFile(src, dst);
+    } catch (err) {
+        console.error(`[StorageUtils] Ошибка копирования из "${src}" в "${dst}": ${err.message}`);
+        throw err;
+    }
+}
+
+/**
+ * Удаляет файл, если он существует.
+ * @param {string} filePath
+ * @returns {Promise<void>}
+ */
+async function deleteFileIfExists(filePath) {
+    try {
+        if (await pathExists(filePath)) {
+            await fs.unlink(filePath);
+        }
+    } catch (err) {
+        console.warn(`[StorageUtils] Не удалось удалить файл "${filePath}": ${err.message}`);
+    }
+}
+
 module.exports = {
-    ensureDirectoryExists,
     pathExists,
+    ensureDirectoryExists,
     writeJsonFileSafe,
     readJsonFile,
+    copyFileSafe,
+    deleteFileIfExists,
 };
