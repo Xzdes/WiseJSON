@@ -75,12 +75,21 @@ class Collection {
 
             console.log(`Collection ('${this.collectionName}'): Применено ${appliedWalOpsCount} операций из WAL. Всего документов в памяти: ${this.documents.size}.`);
             
-            // TODO: На этом этапе, после загрузки документов и WAL, если есть метаданные об индексах,
-            // которые должны были быть загружены (например, из файла .meta коллекции или чекпоинта),
-            // нужно автоматически перестроить эти индексы здесь, вызвав createIndex для каждого.
-            // for (const indexMeta of loadedIndexMetas) {
-            //    await this.createIndex(indexMeta.fieldName, { unique: indexMeta.unique });
+            // TODO INDEXING: (Этап персистентности индексов)
+            // Здесь, после того как this.documents полностью загружены (из чекпоинта и WAL),
+            // нужно будет загрузить метаданные об индексах (например, из специального файла коллекции .meta
+            // или из последнего чекпоинта) и автоматически вызвать this.createIndex() для каждого,
+            // чтобы перестроить их в памяти.
+            // Пример:
+            // const indexMetas = await this._loadIndexMetadata(); // Загрузить откуда-то
+            // for (const meta of indexMetas) {
+            //   try {
+            //     await this.createIndex(meta.fieldName, { unique: meta.unique });
+            //   } catch (indexError) {
+            //     console.error(`Collection ('${this.collectionName}'): Ошибка автоматического перестроения индекса для '${meta.fieldName}' при инициализации: ${indexError.message}`);
+            //   }
             // }
+
 
             this._setupAutomaticCheckpoints();
             
@@ -99,8 +108,7 @@ class Collection {
 
     _applyWalEntryToMemory(entry, isLiveOperation = true) {
         // ВАЖНО: На этом этапе этот метод НЕ обновляет пользовательские индексы.
-        // Он только применяет изменения к this.documents.
-        // Обновление индексов будет добавлено в _enqueueDataModification или в самом этом методе позже.
+        // Обновление индексов будет добавлено на следующем шаге реализации.
         if (!entry || typeof entry.op !== 'string') {
             console.warn(`Collection ('${this.collectionName}'): Пропущена некорректная WAL-подобная запись (отсутствует 'op'): ${JSON.stringify(entry)}`);
             return;
@@ -174,34 +182,39 @@ class Collection {
         const checkpointAttemptTs = new Date().toISOString(); 
         
         const walToProcessPath = await WalManager.prepareWalForCheckpoint(this.walPath, checkpointAttemptTs);
-        // const walCountForThisCheckpoint = await WalManager.readWal(walToProcessPath).then(ops => ops.length); // Это было для лога, можно убрать
+        // const walCountForThisCheckpoint = await WalManager.readWal(walToProcessPath).then(ops => ops.length);
         console.log(`Collection ('${this.collectionName}'): Начало выполнения чекпоинта (ts: ${checkpointAttemptTs}). WAL для обработки: "${path.basename(walToProcessPath)}".`);
         
         try {
-            const checkpointMetaInput = {
-                timestamp: checkpointAttemptTs, // Точная временная метка начала чекпоинта
-                // TODO: На следующем этапе: добавить сюда метаданные об индексах
-                // indexes: Array.from(this.indexes.values()).map(idx => ({ fieldName: idx.fieldName, type: idx.type, unique: idx.type === 'unique' }))
-            };
+            // TODO INDEXING: (Этап персистентности индексов)
+            // Перед созданием чекпоинта, собрать метаданные активных индексов
+            // const indexMetadataForCheckpoint = Array.from(this.indexes.values()).map(idxDef => ({
+            //    fieldName: idxDef.fieldName,
+            //    type: idxDef.type,
+            //    unique: idxDef.type === 'unique'
+            // }));
+            // Эти метаданные должны быть переданы в CheckpointManager.performCheckpoint
+            // и сохранены внутри checkpoint_meta файла.
 
             const checkpointMetaResult = await CheckpointManager.performCheckpoint(
                 this.checkpointsDirPath,
                 this.collectionName,
                 documentsSnapshot, 
-                checkpointMetaInput.timestamp, // Используем timestamp из checkpointMetaInput
+                checkpointAttemptTs, 
                 this.options
-                // TODO: На следующем этапе: передать checkpointMetaInput, чтобы он был сохранен
+                // ,indexMetadataForCheckpoint // Передать сюда
             );
 
-            // TODO: На следующем этапе: если индексы сохраняются на диск, сделать это здесь.
-            // for (const [fieldName, indexDef] of this.indexes.entries()) {
-            //    await IndexPersistenceManager.saveIndex(this.checkpointsDirPath, fieldName, indexDef.data);
-            // }
+            // TODO INDEXING: (Этап персистентности индексов, если данные индексов сохраняются)
+            // Если мы решаем сохранять данные индексов, а не только метаданные,
+            // то здесь нужно будет пройти по this.indexes и сохранить каждый indexDef.data
+            // в отдельный файл, ассоциированный с этим чекпоинтом.
+            // Например, CheckpointManager.saveIndexData(this.checkpointsDirPath, checkpointMetaResult.metaFile, fieldName, indexDef.data);
 
             const opsMoved = await WalManager.finalizeWalAfterCheckpoint(
                 this.walPath, 
                 walToProcessPath, 
-                checkpointMetaResult.timestamp, // Используем timestamp из результата чекпоинта
+                checkpointMetaResult.timestamp, 
                 this.options.walForceSync
             );
             
@@ -219,7 +232,9 @@ class Collection {
             const errorMessage = `Collection ('${this.collectionName}') ERROR: Критическая ошибка во время выполнения чекпоинта (попытка ts: ${checkpointAttemptTs}): ${error.message}`;
             console.error(errorMessage, error.stack);
             if (await StorageUtils.pathExists(walToProcessPath)) {
-                console.warn(`Collection ('${this.collectionName}'): Чекпоинт не удался. Временный WAL "${walToProcessPath}" не был обработан.`);
+                console.warn(`Collection ('${this.collectionName}'): Чекпоинт не удался. Временный WAL "${walToProcessPath}" не был обработан и может содержать данные, соответствующие несостоявшемуся чекпоинту.`);
+                // TODO: Рассмотреть стратегию отката: попытаться переименовать walToProcessPath обратно в основной WAL,
+                // если основной WAL (this.walPath) пуст или содержит только очень новые записи.
             }
             throw new Error(errorMessage); 
         }
@@ -312,18 +327,14 @@ class Collection {
                 if (currentDoc) oldDocSnapshot = { ...currentDoc };
             }
 
-            // TODO: На следующем этапе, здесь нужно будет обновить индексы *ДО* записи в WAL,
-            // если операция может нарушить уникальность индекса.
-            // Если проверка уникальности не пройдена, бросить ошибку и не писать в WAL.
+            // На этом этапе индексы еще не обновляются автоматически при CRUD.
+            // Проверки уникальности (если будут) должны быть ДО этого момента.
 
             await WalManager.appendToWal(this.walPath, finalWalEntry, this.options.walForceSync);
             this.walEntriesCountSinceLastCheckpoint++;
             
             this._applyWalEntryToMemory(finalWalEntry, true); 
             
-            // TODO: На следующем этапе, здесь (или в _applyWalEntryToMemory) нужно обновить
-            // не-уникальные индексы или уникальные, если проверка пройдена.
-
             const result = applyToMemoryAndReturnResultFn(oldDocSnapshot); 
 
             if (eventDetails) {
@@ -331,7 +342,8 @@ class Collection {
                 if (eventDetails.type === 'INSERT') eventArg1 = result; 
                 else if (eventDetails.type === 'UPDATE') { eventArg1 = result; eventArg2 = oldDocSnapshot; }
                 else if (eventDetails.type === 'REMOVE') { eventArg1 = eventDetails.id; eventArg2 = oldDocSnapshot; if (!result) return result; }
-                this._emit(`after${eventDetails.type.charAt(0).toUpperCase() + eventDetails.type.slice(1).toLowerCase()}`, eventArg1, eventArg2);
+                else if (eventDetails.type === 'CLEAR') { /* No specific args */ }
+                 this._emit(`after${eventDetails.type.charAt(0).toUpperCase() + eventDetails.type.slice(1).toLowerCase()}`, eventArg1, eventArg2);
             }
 
             this._triggerCheckpointIfRequired(`Data Modification (${finalWalEntry.op})`);
@@ -412,10 +424,20 @@ class Collection {
             updatedAt: typeof dataObject.updatedAt === 'string' ? dataObject.updatedAt : ts,
         };
 
-        // TODO INDEXING: Если есть уникальные индексы, здесь нужна проверка ПЕРЕД _enqueueDataModification
-        // if (this._violatesUniqueIndexOnInsert(newDoc)) {
-        //    throw new Error(`Нарушение уникального индекса при вставке.`);
-        // }
+        // Проверка уникальности ПЕРЕД постановкой в очередь и записью в WAL
+        for (const [fieldName, indexDef] of this.indexes.entries()) {
+            if (indexDef.type === 'unique') {
+                const value = newDoc[fieldName];
+                if (value !== undefined && value !== null) {
+                    if (indexDef.data.has(value)) {
+                        // Для insert, если значение уже есть, это всегда ошибка (если ID не тот же)
+                        if (indexDef.data.get(value) !== newDoc._id) { // Эта проверка актуальна для upsert, здесь просто has(value)
+                             throw new Error(`Collection ('${this.collectionName}'): Нарушение уникального индекса по полю '${fieldName}' для значения '${value}'. Документ с ID ${indexDef.data.get(value)} уже имеет это значение.`);
+                        }
+                    }
+                }
+            }
+        }
 
         const walEntry = { op: 'INSERT', doc: { ...newDoc } };
 
@@ -443,8 +465,6 @@ class Collection {
         if (typeof queryFunction !== 'function') {
             throw new Error(`Collection ('${this.collectionName}'): queryFunction для find должен быть функцией.`);
         }
-        // TODO INDEXING: Здесь можно будет добавить логику использования индексов, если queryFunction
-        // можно проанализировать или если это объект запроса. Пока полный скан.
         const results = [];
         for (const doc of this.documents.values()) {
             if (queryFunction(doc)) { 
@@ -459,7 +479,6 @@ class Collection {
          if (typeof queryFunction !== 'function') {
             throw new Error(`Collection ('${this.collectionName}'): queryFunction для findOne должен быть функцией.`);
         }
-        // TODO INDEXING: Аналогично find.
         for (const doc of this.documents.values()) {
             if (queryFunction(doc)) { 
                 return { ...doc }; 
@@ -489,13 +508,24 @@ class Collection {
         const updateTimestamp = new Date().toISOString();
         cleanUpdates.updatedAt = updateTimestamp; 
 
-        // TODO INDEXING: Если есть уникальные индексы, и обновляемые поля их затрагивают,
-        // здесь нужна проверка ПЕРЕД _enqueueDataModification.
-        // const potentialUpdatedDoc = { ...currentDoc, ...cleanUpdates };
-        // if (this._violatesUniqueIndexOnUpdate(currentDoc, potentialUpdatedDoc)) {
-        //    throw new Error(`Нарушение уникального индекса при обновлении.`);
-        // }
-
+        const potentialUpdatedDoc = { ...currentDoc, ...cleanUpdates };
+        for (const [fieldName, indexDef] of this.indexes.entries()) {
+            if (indexDef.type === 'unique') {
+                // Проверяем, только если значение индексируемого поля действительно меняется
+                if (Object.prototype.hasOwnProperty.call(cleanUpdates, fieldName)) {
+                    const oldValue = currentDoc[fieldName];
+                    const newValue = potentialUpdatedDoc[fieldName];
+                    if (newValue !== undefined && newValue !== null && newValue !== oldValue) { 
+                        if (indexDef.data.has(newValue)) {
+                            if (indexDef.data.get(newValue) !== id) { // Убеждаемся, что это не тот же самый документ
+                                throw new Error(`Collection ('${this.collectionName}'): Нарушение уникального индекса по полю '${fieldName}' при обновлении ID '${id}' на значение '${newValue}'.`);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
         const walEntry = { op: 'UPDATE', id, data: cleanUpdates };
 
         return this._enqueueDataModification(
@@ -514,11 +544,15 @@ class Collection {
              throw new Error(`Collection ('${this.collectionName}'): ID для remove должен быть непустой строкой.`);
         }
         
-        // oldSnapshot будет получен внутри _enqueueDataModification
+        const currentDoc = this.documents.get(id); // Проверяем существование до WAL для корректного boolean
+        if (!currentDoc) {
+            return false;
+        }
+
         const walEntry = { op: 'REMOVE', id };
         return this._enqueueDataModification(
             walEntry,
-            (oldSnapshotBeforeApply) => !!oldSnapshotBeforeApply,
+            (oldSnapshotBeforeApply) => !!oldSnapshotBeforeApply, // oldSnapshot будет самим currentDoc
             { type: 'REMOVE', id }
         );
     }
@@ -567,28 +601,40 @@ class Collection {
             let finalWalEntry;
             let eventDetails;
             let oldDocSnapshotForEvent = null;
+            let docForIndexUpdate, oldDocForIndexUpdate = null;
 
             if (existingDocumentEntry) { 
                 const existingId = existingDocumentEntry[0];
                 const existingDoc = existingDocumentEntry[1];
                 oldDocSnapshotForEvent = { ...existingDoc };
+                oldDocForIndexUpdate = { ...existingDoc }; 
 
                 const updatesToApply = { ...dataToUpsert };
                 delete updatesToApply._id; 
                 delete updatesToApply.createdAt;
                 updatesToApply.updatedAt = ts; 
 
-                // TODO INDEXING: Проверка уникальности для updatesToApply, если нужно
-                // const potentialUpdatedDoc = { ...existingDoc, ...updatesToApply };
-                // if (this._violatesUniqueIndexOnUpdate(existingDoc, potentialUpdatedDoc)) { /* throw */ }
-
+                const potentialUpdatedDoc = { ...existingDoc, ...updatesToApply };
+                for (const [fieldName, indexDef] of this.indexes.entries()) {
+                    if (indexDef.type === 'unique') {
+                        if (Object.prototype.hasOwnProperty.call(updatesToApply, fieldName)) { // Проверяем только если поле есть в updates
+                            const oldValueInDoc = existingDoc[fieldName];
+                            const newValueInDoc = potentialUpdatedDoc[fieldName];
+                            if (newValueInDoc !== undefined && newValueInDoc !== null && newValueInDoc !== oldValueInDoc) {
+                                if (indexDef.data.has(newValueInDoc) && indexDef.data.get(newValueInDoc) !== existingId) {
+                                    throw new Error(`Collection ('${this.collectionName}'): Upsert (update path) нарушает уникальный индекс по полю '${fieldName}' для значения '${newValueInDoc}'.`);
+                                }
+                            }
+                        }
+                    }
+                }
 
                 finalWalEntry = { op: 'UPDATE', id: existingId, data: { ...updatesToApply }, ts };
                 this._applyWalEntryToMemory(finalWalEntry, true);
-                // TODO INDEXING: Обновить индексы для UPDATE
-                const updatedDocInMemory = this.documents.get(existingId);
-                operationResult = { document: { ...updatedDocInMemory }, operation: 'updated' };
-                eventDetails = { type: 'UPDATE', doc: updatedDocInMemory };
+                docForIndexUpdate = this.documents.get(existingId); 
+                
+                operationResult = { document: { ...docForIndexUpdate }, operation: 'updated' };
+                eventDetails = { type: 'UPDATE', doc: { ...docForIndexUpdate } };
 
             } else { 
                 let docToInsert = {};
@@ -605,20 +651,43 @@ class Collection {
                     : this.options.idGenerator();
                 docToInsert.createdAt = (typeof docToInsert.createdAt === 'string') ? docToInsert.createdAt : ts;
                 docToInsert.updatedAt = ts;
-
-                // TODO INDEXING: Проверка уникальности для docToInsert, если нужно
-                // if (this._violatesUniqueIndexOnInsert(docToInsert)) { /* throw */ }
+                
+                for (const [fieldName, indexDef] of this.indexes.entries()) {
+                    if (indexDef.type === 'unique') {
+                        const value = docToInsert[fieldName];
+                        if (value !== undefined && value !== null) {
+                            if (indexDef.data.has(value) && indexDef.data.get(value) !== docToInsert._id) { 
+                                throw new Error(`Collection ('${this.collectionName}'): Upsert (insert path) нарушает уникальный индекс по полю '${fieldName}' для значения '${value}'.`);
+                            }
+                        }
+                    }
+                }
                 
                 finalWalEntry = { op: 'INSERT', doc: { ...docToInsert }, ts };
                 this._applyWalEntryToMemory(finalWalEntry, true);
-                // TODO INDEXING: Обновить индексы для INSERT
-                const insertedDocInMemory = this.documents.get(docToInsert._id); 
-                operationResult = { document: { ...insertedDocInMemory }, operation: 'inserted' };
-                eventDetails = { type: 'INSERT', doc: insertedDocInMemory };
+                docForIndexUpdate = this.documents.get(docToInsert._id); 
+
+                operationResult = { document: { ...docForIndexUpdate }, operation: 'inserted' };
+                eventDetails = { type: 'INSERT', doc: { ...docForIndexUpdate } };
             }
             
             await WalManager.appendToWal(this.walPath, finalWalEntry, this.options.walForceSync);
             this.walEntriesCountSinceLastCheckpoint++;
+
+            // Обновление индексов ПОСЛЕ записи в WAL и применения к памяти
+            // Это должно быть в блоке try/catch с обработкой ошибки рассинхронизации
+            try {
+                if (finalWalEntry.op === 'INSERT' && docForIndexUpdate) {
+                    this._updateIndexesAfterInsert(docForIndexUpdate);
+                } else if (finalWalEntry.op === 'UPDATE' && oldDocForIndexUpdate && docForIndexUpdate) {
+                    this._updateIndexesAfterUpdate(oldDocForIndexUpdate, docForIndexUpdate);
+                }
+            } catch (indexError) {
+                 console.error(`Collection ('${this.collectionName}') CRITICAL: Ошибка обновления индекса после UPSERT (${finalWalEntry.op}): ${indexError.message}. Индексы могут быть неконсистентны!`, indexError.stack);
+                 // Решить, нужно ли перебрасывать ошибку, чтобы вся операция upsert считалась неуспешной
+                 // throw indexError;
+            }
+
 
             if (eventDetails.type === 'INSERT' && eventDetails.doc) {
                 this._emit('afterInsert', eventDetails.doc);
@@ -637,11 +706,8 @@ class Collection {
         const walEntry = { op: 'CLEAR' };
         return this._enqueueDataModification(
             walEntry,
-            () => {
-                // TODO INDEXING: Очистить все индексы
-                // this.indexes.forEach(indexDef => indexDef.data.clear());
-            },
-            { type: 'CLEAR' }
+            () => { /* _applyWalEntryToMemory уже очистила this.documents */ },
+            { type: 'CLEAR' } // Для _updateIndexesAfter* (которое вызовет очистку индексов) и события
         );
     }
     
@@ -660,7 +726,7 @@ class Collection {
         const indexInfo = Array.from(this.indexes.values()).map(idx => ({
             fieldName: idx.fieldName,
             type: idx.type,
-            size: idx.data.size 
+            entries: idx.data.size 
         }));
 
         return {
@@ -673,7 +739,7 @@ class Collection {
             walEntriesSinceLastCheckpoint: this.walEntriesCountSinceLastCheckpoint,
             checkpointsPath: this.checkpointsDirPath,
             lastCheckpointTimestamp: this.lastCheckpointTimestamp,
-            indexes: indexInfo, // Добавляем информацию об индексах
+            indexes: indexInfo, 
             options: { ...this.options } 
         };
     }
@@ -746,7 +812,7 @@ class Collection {
             
             this.isInitialized = false; 
             this.documents.clear(); 
-            this.indexes.clear(); // Очищаем индексы в памяти
+            this.indexes.clear(); 
             this.indexedFields.clear();
             const closedError = new Error(`Collection ('${this.collectionName}') is closed.`);
             this.initPromise = Promise.reject(closedError);
@@ -771,25 +837,24 @@ class Collection {
         }
     }
 
-    // --- МЕТОДЫ ДЛЯ УПРАВЛЕНИЯ ИНДЕКСАМИ (Базовая реализация) ---
-
     async createIndex(fieldName, options = {}) {
         await this._ensureInitialized();
         if (typeof fieldName !== 'string' || fieldName.trim() === '') {
             throw new Error(`Collection ('${this.collectionName}'): Имя поля для индекса должно быть непустой строкой.`);
         }
-
         const isUnique = !!options.unique;
-
         return this._enqueueInternalOperation(async () => {
+            if (this.indexes.has(fieldName)) { // Если индекс уже есть, удаляем его перед перестроением
+                console.log(`Collection ('${this.collectionName}'): Индекс для поля '${fieldName}' уже существует, будет перестроен.`);
+                this.indexes.delete(fieldName);
+                this.indexedFields.delete(fieldName); // Удаляем из сета тоже
+            }
             console.log(`Collection ('${this.collectionName}'): Создание/перестроение ${isUnique ? 'уникального' : 'простого'} индекса для поля '${fieldName}'...`);
-
             const newIndexData = new Map();
             const tempValueSetForUniqueness = isUnique ? new Set() : null;
-
+            
             for (const [docId, doc] of this.documents.entries()) {
                 const value = doc[fieldName]; 
-
                 if (isUnique) {
                     if (value !== undefined && value !== null) { 
                         if (tempValueSetForUniqueness.has(value)) {
@@ -800,23 +865,13 @@ class Collection {
                     }
                 } else { 
                     let idSet = newIndexData.get(value);
-                    if (!idSet) {
-                        idSet = new Set();
-                        newIndexData.set(value, idSet);
-                    }
+                    if (!idSet) { idSet = new Set(); newIndexData.set(value, idSet); }
                     idSet.add(docId);
                 }
             }
-
-            this.indexes.set(fieldName, {
-                type: isUnique ? 'unique' : 'simple',
-                fieldName: fieldName,
-                data: newIndexData,
-            });
+            this.indexes.set(fieldName, { type: isUnique ? 'unique' : 'simple', fieldName: fieldName, data: newIndexData });
             this.indexedFields.add(fieldName);
-
             console.log(`Collection ('${this.collectionName}'): ${isUnique ? 'Уникальный' : 'Простой'} индекс для поля '${fieldName}' успешно создан/перестроен. Записей в индексе: ${newIndexData.size}.`);
-            // TODO: Сохранить метаданные индекса персистентно
         }, `CreateIndex-${fieldName}`);
     }
 
@@ -825,13 +880,11 @@ class Collection {
         if (typeof fieldName !== 'string' || fieldName.trim() === '') {
             throw new Error(`Collection ('${this.collectionName}'): Имя поля для удаления индекса должно быть непустой строкой.`);
         }
-        
         return this._enqueueInternalOperation(() => {
             if (this.indexes.has(fieldName)) {
                 this.indexes.delete(fieldName);
                 this.indexedFields.delete(fieldName);
                 console.log(`Collection ('${this.collectionName}'): Индекс для поля '${fieldName}' удален.`);
-                // TODO: Удалить персистентные метаданные индекса
                 return true;
             }
             console.log(`Collection ('${this.collectionName}'): Индекс для поля '${fieldName}' не найден, удаление не требуется.`);
@@ -843,11 +896,7 @@ class Collection {
         await this._ensureInitialized();
         const indexInfo = [];
         for (const [fieldName, indexDef] of this.indexes.entries()) {
-            indexInfo.push({
-                fieldName: indexDef.fieldName,
-                type: indexDef.type,
-                // Можно добавить размер: indexDef.data.size
-            });
+            indexInfo.push({ fieldName: indexDef.fieldName, type: indexDef.type, entries: indexDef.data.size });
         }
         return indexInfo;
     }
@@ -858,24 +907,15 @@ class Collection {
             console.warn(`Collection ('${this.collectionName}'): Попытка findOneByIndexedValue, но индекс для поля '${fieldName}' не существует.`);
             return null;
         }
-
         const indexDef = this.indexes.get(fieldName);
         const indexData = indexDef.data; 
-
         if (indexDef.type === 'unique') {
             const docId = indexData.get(value);
-            if (docId) {
-                const doc = this.documents.get(docId);
-                return doc ? { ...doc } : null;
-            }
+            if (docId) { const doc = this.documents.get(docId); return doc ? { ...doc } : null; }
             return null;
         } else if (indexDef.type === 'simple') {
             const idSet = indexData.get(value);
-            if (idSet && idSet.size > 0) {
-                const firstId = idSet.values().next().value; 
-                const doc = this.documents.get(firstId);
-                return doc ? { ...doc } : null;
-            }
+            if (idSet && idSet.size > 0) { const firstId = idSet.values().next().value; const doc = this.documents.get(firstId); return doc ? { ...doc } : null; }
             return null;
         }
         return null; 
@@ -887,25 +927,15 @@ class Collection {
             console.warn(`Collection ('${this.collectionName}'): Попытка findByIndexedValue, но индекс для поля '${fieldName}' не существует.`);
             return [];
         }
-
         const indexDef = this.indexes.get(fieldName);
         const indexData = indexDef.data;
         const results = [];
-
         if (indexDef.type === 'unique') {
             const docId = indexData.get(value);
-            if (docId) {
-                const doc = this.documents.get(docId);
-                if (doc) results.push({ ...doc });
-            }
+            if (docId) { const doc = this.documents.get(docId); if (doc) results.push({ ...doc }); }
         } else if (indexDef.type === 'simple') {
             const idSet = indexData.get(value);
-            if (idSet) {
-                for (const docId of idSet) {
-                    const doc = this.documents.get(docId);
-                    if (doc) results.push({ ...doc });
-                }
-            }
+            if (idSet) { for (const docId of idSet) { const doc = this.documents.get(docId); if (doc) results.push({ ...doc }); } }
         }
         return results;
     }
