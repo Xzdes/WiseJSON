@@ -1,0 +1,46 @@
+# Node modules
+node_modules/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Environment files
+.env
+.env.*.local
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Editor/IDE files
+.vscode/
+.idea/
+*.swp
+
+# Coverage and test results
+coverage/
+*.lcov
+
+# Build output
+dist/
+build/
+
+# Optional npm cache directory
+.npm/
+
+# Local npm logs
+.npm/_logs
+
+# Temporary files
+tmp/
+temp/

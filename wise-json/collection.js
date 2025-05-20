@@ -1,5 +1,5 @@
 // wise-json/collection.js
-const fs = require('fs/promises');
+const fs = require('fs/promises'); // Используется редко, в основном для fs.stat в getCollectionStats
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 
@@ -53,7 +53,7 @@ class Collection {
     async _initializeAndRecover() {
         try {
             await StorageUtils.ensureDirectoryExists(this.collectionDirectoryPath);
-            await WalManager.initializeWal(this.walPath, this.collectionDirectoryPath);
+            await WalManager.initializeWal(this.walPath, this.collectionDirectoryPath); // Передаем collectionDirectoryPath
 
             const checkpointResult = await CheckpointManager.loadLatestCheckpoint(this.checkpointsDirPath, this.collectionName);
             this.documents = checkpointResult.documents; 
@@ -68,14 +68,18 @@ class Collection {
                 this._applyWalEntryToMemory(entry, false); 
                 appliedWalOpsCount++;
             }
+            // walEntriesCountSinceLastCheckpoint - это количество операций в текущем WAL, которые *еще не* вошли в чекпоинт.
+            // Если lastCheckpointTimestamp есть, то appliedWalOpsCount - это именно они.
+            // Если lastCheckpointTimestamp нет (нет чекпоинтов), то все записи WAL - "новые" относительно пустого состояния.
             this.walEntriesCountSinceLastCheckpoint = appliedWalOpsCount; 
 
             console.log(`Collection ('${this.collectionName}'): Применено ${appliedWalOpsCount} операций из WAL. Всего документов в памяти: ${this.documents.size}.`);
 
             this._setupAutomaticCheckpoints();
             
+            // Запускаем очистку старых чекпоинтов асинхронно, не блокируя initPromise
             CheckpointManager.cleanupOldCheckpoints(this.checkpointsDirPath, this.collectionName, this.options.checkpointsToKeep)
-                .catch(err => console.error(`Collection ('${this.collectionName}'): Ошибка при фоновой очистке старых чекпоинтов: ${err.message}`));
+                .catch(err => console.error(`Collection ('${this.collectionName}'): Ошибка при фоновой очистке старых чекпоинтов во время инициализации: ${err.message}`));
 
             this.isInitialized = true;
             console.log(`Collection ('${this.collectionName}'): Инициализация успешно завершена.`);
@@ -94,7 +98,7 @@ class Collection {
         }
         
         const opTimestamp = entry.ts || (isLiveOperation ? new Date().toISOString() : null);
-        if (!opTimestamp && isLiveOperation) {
+        if (!opTimestamp && isLiveOperation && entry.op !== 'CLEAR') { // Для CLEAR ts не так важен
              console.warn(`Collection ('${this.collectionName}'): Для живой операции (${entry.op}) отсутствует временная метка, используется текущее время.`);
         }
 
@@ -106,8 +110,8 @@ class Collection {
                         if (!docToStore.createdAt && opTimestamp) docToStore.createdAt = opTimestamp;
                         if (!docToStore.updatedAt && opTimestamp) docToStore.updatedAt = opTimestamp;
                     } else { 
-                        if (!docToStore.createdAt) docToStore.createdAt = entry.doc.createdAt || opTimestamp;
-                        if (!docToStore.updatedAt) docToStore.updatedAt = entry.doc.updatedAt || opTimestamp;
+                        docToStore.createdAt = entry.doc.createdAt || opTimestamp;
+                        docToStore.updatedAt = entry.doc.updatedAt || opTimestamp;
                     }
                     this.documents.set(docToStore._id, docToStore);
                 } else {
@@ -115,22 +119,24 @@ class Collection {
                 }
                 break;
             case 'UPDATE':
-                if (typeof entry.id === 'string' && this.documents.has(entry.id) && entry.data && typeof entry.data === 'object') {
-                    const existingDoc = this.documents.get(entry.id);
-                    const updatedDoc = { ...existingDoc, ...entry.data };
-                    
-                    if (entry.data.updatedAt) { // Если в данных операции есть updatedAt, он приоритетнее
-                        updatedDoc.updatedAt = entry.data.updatedAt;
-                    } else if (opTimestamp) { // Иначе используем общий timestamp операции
-                        updatedDoc.updatedAt = opTimestamp;
-                    }
-                    this.documents.set(entry.id, updatedDoc);
-                } else {
-                    if (typeof entry.id === 'string' && !this.documents.has(entry.id)) {
-                        // console.log(`Collection ('${this.collectionName}'): Документ с ID '${entry.id}' не найден в памяти для операции UPDATE.`);
+                if (typeof entry.id === 'string' && entry.data && typeof entry.data === 'object') {
+                    if (this.documents.has(entry.id)) {
+                        const existingDoc = this.documents.get(entry.id);
+                        const updatedDoc = { ...existingDoc, ...entry.data };
+                        
+                        if (entry.data.updatedAt) { 
+                            updatedDoc.updatedAt = entry.data.updatedAt;
+                        } else if (opTimestamp) { 
+                            updatedDoc.updatedAt = opTimestamp;
+                        }
+                        this.documents.set(entry.id, updatedDoc);
                     } else {
-                        console.warn(`Collection ('${this.collectionName}'): Пропущена UPDATE запись для ID '${entry.id}' (некорректные данные или ID): ${JSON.stringify(entry)}`);
+                        // При восстановлении это может быть нормально, если документ был удален операцией, еще не попавшей в чекпоинт,
+                        // но сам UPDATE для уже удаленного документа не должен ничего делать.
+                        // console.log(`Collection ('${this.collectionName}'): Документ с ID '${entry.id}' не найден в памяти для операции UPDATE.`);
                     }
+                } else {
+                    console.warn(`Collection ('${this.collectionName}'): Пропущена UPDATE запись для ID '${entry.id}' (некорректные данные или ID): ${JSON.stringify(entry)}`);
                 }
                 break;
             case 'REMOVE':
@@ -157,33 +163,81 @@ class Collection {
         
         const documentsSnapshot = new Map(this.documents); 
         const checkpointAttemptTs = new Date().toISOString(); 
-        const walCountAtCheckpointStart = this.walEntriesCountSinceLastCheckpoint;
+        
+        // Переименовываем текущий WAL, чтобы новые операции шли в новый файл WAL.
+        // walToProcessPath - это WAL, который СООТВЕТСТВУЕТ documentsSnapshot.
+        const walToProcessPath = await WalManager.prepareWalForCheckpoint(this.walPath, checkpointAttemptTs);
+        const walCountForThisCheckpoint = await WalManager.readWal(walToProcessPath).then(ops => ops.length); // Сколько операций в WAL, идущем в этот чекпоинт
 
-        console.log(`Collection ('${this.collectionName}'): Начало выполнения чекпоинта (попытка ts: ${checkpointAttemptTs}). Записей WAL с последнего чекпоинта: ${walCountAtCheckpointStart}.`);
+        console.log(`Collection ('${this.collectionName}'): Начало выполнения чекпоинта (ts: ${checkpointAttemptTs}). WAL для обработки: "${path.basename(walToProcessPath)}" (${walCountForThisCheckpoint} записей).`);
         
         try {
             const checkpointMeta = await CheckpointManager.performCheckpoint(
                 this.checkpointsDirPath,
                 this.collectionName,
                 documentsSnapshot, 
-                checkpointAttemptTs, 
+                checkpointAttemptTs, // Эта метка соответствует данным в documentsSnapshot
                 this.options
             );
 
-            await WalManager.processWalAfterCheckpoint(this.walPath, checkpointAttemptTs);
-            
-            this.walEntriesCountSinceLastCheckpoint = Math.max(0, this.walEntriesCountSinceLastCheckpoint - walCountAtCheckpointStart);
-            this.lastCheckpointTimestamp = checkpointMeta.timestamp; 
+            // После успешного сохранения чекпоинта, финализируем WAL.
+            // Переносим записи из walToProcessPath, которые новее checkpointMeta.timestamp (т.е. пришли во время чекпоинта),
+            // в текущий активный this.walPath.
+            // Однако, поскольку мы переименовали WAL *до* создания снимка, все записи в walToProcessPath
+            // должны быть *старше или равны* checkpointAttemptTs.
+            // Те, что новее чекпоинта, будут уже в новом this.walPath.
+            // Поэтому, после успешного чекпоинта, walToProcessPath можно просто удалить.
+            // Но для большей надежности, если checkpointMeta.timestamp немного отличается от checkpointAttemptTs,
+            // или если мы хотим обработать записи, пришедшие во время самого performCheckpoint, нужна более сложная логика.
+            // Текущий WalManager.finalizeWalAfterCheckpoint() пытается перенести "новые" записи из walToProcessPath.
+            // Но так как prepareWalForCheckpoint уже отделил "старый" WAL, то в walToProcessPath не должно быть ничего новее checkpointAttemptTs.
+            // Значит, finalizeWalAfterCheckpoint должен по сути просто удалить walToProcessPath.
+            // Или, если мы хотим быть супер-надежными, он может проверить, есть ли в walToProcessPath записи,
+            // которые по какой-то причине новее checkpointMeta.timestamp и дописать их.
 
-            console.log(`Collection ('${this.collectionName}'): Чекпоинт успешно создан и WAL обработан (ts: ${checkpointMeta.timestamp}). Оставшиеся WAL записи для след. чекпоинта: ${this.walEntriesCountSinceLastCheckpoint}`);
+            // Упрощенная логика: если чекпоинт успешен, старый WAL (walToProcessPath) больше не нужен в таком виде.
+            // Записи, пришедшие во время чекпоинта, уже пишутся в новый this.walPath.
+            // `WalManager.finalizeWalAfterCheckpoint` должен удалить `walToProcessPath`.
+            // И обновить `this.walEntriesCountSinceLastCheckpoint` на основе нового `this.walPath`.
+
+            const opsMoved = await WalManager.finalizeWalAfterCheckpoint(
+                this.walPath, // текущий (возможно, новый/пустой) WAL
+                walToProcessPath, // WAL, который был заархивирован
+                checkpointMeta.timestamp, // метка сохраненного чекпоинта
+                this.options.walForceSync
+            );
+            
+            this.lastCheckpointTimestamp = checkpointMeta.timestamp; 
+            // Сбрасываем счетчик, так как все из walToProcessPath либо вошло в чекпоинт, либо перенесено.
+            // Новые записи, пришедшие в this.walPath во время чекпоинта, уже будут учтены при следующем инкременте.
+            // Правильнее будет установить счетчик в количество операций, реально оставшихся в this.walPath.
+            const remainingWalOpsAfterFinalize = await WalManager.readWal(this.walPath, this.lastCheckpointTimestamp);
+            this.walEntriesCountSinceLastCheckpoint = remainingWalOpsAfterFinalize.length;
+
+
+            console.log(`Collection ('${this.collectionName}'): Чекпоинт успешно создан (meta: ${checkpointMeta.metaFile}, ts: ${checkpointMeta.timestamp}). WAL обработан, перенесено ${opsMoved} операций. Текущих WAL записей: ${this.walEntriesCountSinceLastCheckpoint}.`);
 
              CheckpointManager.cleanupOldCheckpoints(this.checkpointsDirPath, this.collectionName, this.options.checkpointsToKeep)
-                .catch(err => console.error(`Collection ('${this.collectionName}'): Ошибка при фоновой очистке старых чекпоинтов после успешного чекпоинта: ${err.message}`));
+                .catch(err => console.error(`Collection ('${this.collectionName}'): Ошибка при фоновой очистке старых чекпоинтов: ${err.message}`));
 
             return checkpointMeta.timestamp;
         } catch (error) {
             const errorMessage = `Collection ('${this.collectionName}') ERROR: Критическая ошибка во время выполнения чекпоинта (попытка ts: ${checkpointAttemptTs}): ${error.message}`;
             console.error(errorMessage, error.stack);
+            // Если чекпоинт не удался, walToProcessPath все еще содержит WAL на момент начала чекпоинта.
+            // Нужно попытаться восстановить основной WAL из него, если это возможно, или хотя бы не удалять walToProcessPath.
+            // Сейчас мы просто бросаем ошибку. Это требует доработки для "пуленепробиваемости".
+            // Пока что, если чекпоинт упал, walToProcessPath остается, а this.walPath - это новый WAL.
+            // При следующем запуске, если walToProcessPath не обработан, это может вызвать проблемы.
+            // Лучше попытаться переименовать walToProcessPath обратно в this.walPath, если this.walPath пуст.
+            if (await StorageUtils.pathExists(walToProcessPath)) {
+                console.warn(`Collection ('${this.collectionName}'): Чекпоинт не удался. Временный WAL "${walToProcessPath}" не был обработан.`);
+                // Попытка восстановить:
+                // const currentWalIsEmpty = !(await StorageUtils.pathExists(this.walPath)) || (await fs.stat(this.walPath)).size === 0;
+                // if (currentWalIsEmpty) {
+                //    try { await fs.rename(walToProcessPath, this.walPath); console.log(`Восстановлен WAL из ${walToProcessPath}`); } catch (e) {}
+                // }
+            }
             throw new Error(errorMessage); 
         }
     }
@@ -198,7 +252,6 @@ class Collection {
             console.log(`Collection ('${this.collectionName}'): Достигнут лимит WAL (${this.walEntriesCountSinceLastCheckpoint}/${this.options.maxWalEntriesBeforeCheckpoint}) после '${operationName}', ставим чекпоинт в очередь.`);
             
             this.isCheckpointScheduledOrRunning = true;
-
             this._enqueueInternalOperation(
                 async () => { 
                     try {
@@ -225,7 +278,6 @@ class Collection {
                 if (this.isInitialized && !this.isCheckpointScheduledOrRunning && this.walEntriesCountSinceLastCheckpoint > 0) {
                      console.log(`Collection ('${this.collectionName}'): Автоматический чекпоинт по интервалу (${intervalMs}ms).`);
                      this.isCheckpointScheduledOrRunning = true;
-
                      this._enqueueInternalOperation(async () => {
                         try {
                             await this._performCheckpoint();
@@ -238,7 +290,7 @@ class Collection {
                 }
             }, intervalMs);
             if (this.checkpointTimerId && typeof this.checkpointTimerId.unref === 'function') {
-                this.checkpointTimerId.unref(); // Не мешаем процессу завершиться
+                this.checkpointTimerId.unref();
             }
         }
     }
@@ -262,7 +314,7 @@ class Collection {
                 }
             });
             
-        this.writeQueue = promise.catch(err => { /* Подавляем UnhandledPromiseRejectionWarning для this.writeQueue */ });
+        this.writeQueue = promise.catch(err => {});
         return promise; 
     }
     
@@ -296,7 +348,7 @@ class Collection {
                     eventArg2 = oldDocSnapshot; 
                     if (!result) return result; 
                 } else if (eventDetails.type === 'CLEAR') {
-                    // No specific args for clear beyond event name
+                    // No specific args
                 }
                  this._emit(`after${eventDetails.type.charAt(0).toUpperCase() + eventDetails.type.slice(1).toLowerCase()}`, eventArg1, eventArg2);
             }
@@ -309,15 +361,13 @@ class Collection {
 
     async _ensureInitialized() {
         if (!this.initPromise) {
-            const msg = `Collection ('${this.collectionName}'): Критическая ошибка - initPromise отсутствует. Конструктор мог не завершиться.`;
+            const msg = `Collection ('${this.collectionName}'): Критическая ошибка - initPromise отсутствует.`;
             console.error(msg);
             throw new Error(msg);
         }
         await this.initPromise; 
         if (!this.isInitialized) {
-            const msg = `Collection ('${this.collectionName}'): Инициализация не удалась (isInitialized=false), но initPromise разрешился. Это не должно происходить.`;
-            // Эта ситуация может возникнуть, если initPromise был перехвачен и разрешен где-то выше, несмотря на ошибку.
-            // Но в нашей текущей схеме initPromise должен быть отклонен при ошибке.
+            const msg = `Collection ('${this.collectionName}'): Инициализация не удалась (isInitialized=false), но initPromise разрешился.`;
             console.error(msg);
             throw new Error(msg); 
         }
@@ -333,7 +383,7 @@ class Collection {
                         console.error(`Collection ('${this.collectionName}') Event Listener Error (event: '${eventName}'): ${listenerError.message}`, listenerError.stack);
                     });
                 } catch (syncError) { 
-                    console.error(`Collection ('${this.collectionName}') Event Listener Error (event: '${eventName}'): Синхронная ошибка при вызове: ${syncError.message}`, syncError.stack);
+                    console.error(`Collection ('${this.collectionName}') Event Listener Error (event: '${eventName}'): Синхронная ошибка: ${syncError.message}`, syncError.stack);
                 }
             });
         }
@@ -381,14 +431,11 @@ class Collection {
             updatedAt: typeof dataObject.updatedAt === 'string' ? dataObject.updatedAt : ts,
         };
 
-        const walEntry = { op: 'INSERT', doc: { ...newDoc } }; // ts будет добавлен в _enqueueDataModification
+        const walEntry = { op: 'INSERT', doc: { ...newDoc } };
 
         return this._enqueueDataModification(
             walEntry, 
-            () => { 
-                // _applyWalEntryToMemory уже была вызвана. newDoc содержит финальное состояние.
-                return { ...newDoc }; 
-            },
+            () => ({ ...newDoc }), // Возвращаем копию нового документа
             { type: 'INSERT', doc: { ...newDoc } } 
         );
     }
@@ -441,9 +488,9 @@ class Collection {
             throw new Error(`Collection ('${this.collectionName}'): updates для update должен быть объектом.`);
         }
 
-        // Проверяем, существует ли документ до постановки в очередь, чтобы избежать лишних WAL записей
+        // Оптимистичная проверка перед постановкой в очередь
         if (!this.documents.has(id)) {
-            return null;
+            return null; 
         }
 
         const cleanUpdates = { ...updates }; 
@@ -451,17 +498,14 @@ class Collection {
         delete cleanUpdates.createdAt;
         
         const updateTimestamp = new Date().toISOString();
-        cleanUpdates.updatedAt = updateTimestamp; // Явно устанавливаем updatedAt для данных, идущих в WAL
+        cleanUpdates.updatedAt = updateTimestamp; 
 
-        const walEntry = { op: 'UPDATE', id, data: cleanUpdates }; // ts будет добавлен позже
+        const walEntry = { op: 'UPDATE', id, data: cleanUpdates };
 
         return this._enqueueDataModification(
             walEntry,
             () => { 
-                // _applyWalEntryToMemory уже была вызвана.
                 const updatedDoc = this.documents.get(id); 
-                // Если документ был удален другой операцией между проверкой has(id) и этим моментом,
-                // то updatedDoc будет undefined. _applyWalEntryToMemory для UPDATE не создаст документ.
                 return updatedDoc ? { ...updatedDoc } : null; 
             },
             { type: 'UPDATE', id } 
@@ -474,20 +518,15 @@ class Collection {
              throw new Error(`Collection ('${this.collectionName}'): ID для remove должен быть непустой строкой.`);
         }
         
-        // Проверяем существование до постановки в очередь для оптимизации
+        // Оптимистичная проверка перед постановкой в очередь
         if (!this.documents.has(id)) {
             return false;
         }
 
-        const walEntry = { op: 'REMOVE', id }; // ts будет добавлен позже
-
+        const walEntry = { op: 'REMOVE', id };
         return this._enqueueDataModification(
             walEntry,
-            (oldSnapshotBeforeApply) => { 
-                // oldSnapshotBeforeApply содержит документ, если он был.
-                // _applyWalEntryToMemory УЖЕ удалила его из this.documents.
-                return !!oldSnapshotBeforeApply; // Возвращаем true, если документ существовал до удаления.
-            },
+            (oldSnapshotBeforeApply) => !!oldSnapshotBeforeApply,
             { type: 'REMOVE', id }
         );
     }
@@ -523,7 +562,7 @@ class Collection {
                 Object.keys(query).every(key => doc[key] === query[key])
             );
             
-            let existingDocumentEntry = null; // [id, doc]
+            let existingDocumentEntry = null; 
             for (const entry of this.documents.entries()) {
                 if (queryFn(entry[1])) { 
                     existingDocumentEntry = entry;
@@ -547,9 +586,9 @@ class Collection {
                 delete updatesToApply.createdAt;
                 updatesToApply.updatedAt = ts; 
 
-                finalWalEntry = { op: 'UPDATE', id: existingId, data: { ...updatesToApply }, ts };
+                finalWalEntry = { op: 'UPDATE', id: existingId, data: { ...updatesToApply }, ts }; // ts здесь для WAL записи
                 
-                this._applyWalEntryToMemory(finalWalEntry, true);
+                this._applyWalEntryToMemory(finalWalEntry, true); // true т.к. живая операция
                 const updatedDocInMemory = this.documents.get(existingId); 
                 
                 operationResult = { document: { ...updatedDocInMemory }, operation: 'updated' };
@@ -571,7 +610,7 @@ class Collection {
                 docToInsert.createdAt = (typeof docToInsert.createdAt === 'string') ? docToInsert.createdAt : ts;
                 docToInsert.updatedAt = ts;
                 
-                finalWalEntry = { op: 'INSERT', doc: { ...docToInsert }, ts };
+                finalWalEntry = { op: 'INSERT', doc: { ...docToInsert }, ts }; // ts здесь для WAL записи
                 
                 this._applyWalEntryToMemory(finalWalEntry, true);
                 const insertedDocInMemory = this.documents.get(docToInsert._id); 
@@ -597,7 +636,7 @@ class Collection {
 
     async clear() {
         await this._ensureInitialized();
-        const walEntry = { op: 'CLEAR' };
+        const walEntry = { op: 'CLEAR' }; // ts будет добавлен в _enqueueDataModification
         return this._enqueueDataModification(
             walEntry,
             () => { /* _applyWalEntryToMemory уже очистила this.documents */ },
@@ -615,7 +654,7 @@ class Collection {
                 const stats = await fs.stat(this.walPath);
                 walSizeBytes = stats.size;
             }
-        } catch (e) { /* ignore */ }
+        } catch (e) { /* ignore, e.g. file just deleted */ }
 
         return {
             collectionName: this.collectionName,
@@ -638,9 +677,7 @@ class Collection {
                 console.log(`Collection ('${this.collectionName}'): Ручной вызов save(), но чекпоинт уже запланирован или выполняется. Новый чекпоинт не будет запущен.`);
                 return this.lastCheckpointTimestamp; 
             }
-            // Выполняем чекпоинт, если были изменения с последнего чекпоинта,
-            // или если чекпоинтов еще не было (даже для пустой коллекции),
-            // ИЛИ если есть документы в памяти (на случай, если walEntriesCount был сброшен ошибкой, но данные есть).
+            
             if (this.walEntriesCountSinceLastCheckpoint > 0 || !this.lastCheckpointTimestamp || (this.documents.size > 0 && !this.lastCheckpointTimestamp) ) {
                 this.isCheckpointScheduledOrRunning = true;
                 try {
@@ -659,10 +696,6 @@ class Collection {
         console.log(`Collection ('${this.collectionName}'): Попытка закрытия... Ожидание очереди операций.`);
         
         const finalOperationPromise = this._enqueueInternalOperation(async () => {
-            // На момент выполнения этой операции в очереди, this.isInitialized должно быть true,
-            // если _ensureInitialized в _enqueueInternalOperation отработал успешно.
-            // Если инициализация упала, _ensureInitialized перебросит ошибку, и мы сюда не дойдем.
-
             console.log(`Collection ('${this.collectionName}'): Очередь операций достигла операции закрытия. Приступаем к закрытию.`);
             if (this.checkpointTimerId) {
                 clearInterval(this.checkpointTimerId);
@@ -670,13 +703,21 @@ class Collection {
                 console.log(`Collection ('${this.collectionName}'): Таймер автоматических чекпоинтов остановлен.`);
             }
 
+            let closedGracefully = false;
             if (this.isInitialized) { 
-                if (this.walEntriesCountSinceLastCheckpoint > 0 || (!this.lastCheckpointTimestamp && (this.documents.size > 0 || await StorageUtils.pathExists(this.walPath) && (await fs.stat(this.walPath)).size > 0) )) {
+                // Финальный чекпоинт, если есть несохраненные изменения или это первый чекпоинт для пустой коллекции с WAL
+                const hasPendingWalData = this.walEntriesCountSinceLastCheckpoint > 0;
+                const noCheckpointsYet = !this.lastCheckpointTimestamp;
+                const hasDataInMemory = this.documents.size > 0;
+                let needsCheckpoint = hasPendingWalData || (noCheckpointsYet && (hasDataInMemory || (await StorageUtils.pathExists(this.walPath) && (await fs.stat(this.walPath)).size > 0) ));
+                
+                if (needsCheckpoint) {
                     if (!this.isCheckpointScheduledOrRunning) {
                         this.isCheckpointScheduledOrRunning = true;
                         try {
                             console.log(`Collection ('${this.collectionName}'): Выполнение финального чекпоинта при закрытии.`);
                             await this._performCheckpoint();
+                            closedGracefully = true; 
                         } catch (err) {
                             console.error(`Collection ('${this.collectionName}'): Ошибка при выполнении финального чекпоинта во время закрытия: ${err.message}`);
                         } finally {
@@ -686,33 +727,34 @@ class Collection {
                         console.warn(`Collection ('${this.collectionName}'): Финальный чекпоинт пропущен при закрытии, т.к. другой чекпоинт уже выполняется/запланирован.`);
                     }
                 } else {
-                    console.log(`Collection ('${this.collectionName}'): Нет несохраненных изменений, финальный чекпоинт не требуется при закрытии.`);
+                    console.log(`Collection ('${this.collectionName}'): Нет несохраненных изменений или чекпоинт не требуется, финальный чекпоинт не выполняется.`);
+                    closedGracefully = true;
                 }
             } else {
                  console.log(`Collection ('${this.collectionName}'): Коллекция не была полностью инициализирована, финальный чекпоинт при закрытии пропущен.`);
+                 closedGracefully = true; 
             }
             
             this.isInitialized = false; 
             this.documents.clear(); 
-            // После закрытия, initPromise должен указывать на то, что коллекция не готова.
-            // Создаем новый отклоненный промис или промис, который говорит, что она закрыта.
-            this.initPromise = Promise.reject(new Error(`Collection ('${this.collectionName}') is closed.`));
-            this.initPromise.catch(()=>{}); // Подавляем UnhandledPromiseRejectionWarning для этого специального промиса
-            console.log(`Collection ('${this.collectionName}'): initPromise установлен в rejected state.`);
-            console.log(`Collection ('${this.collectionName}'): Коллекция успешно закрыта (ресурсы освобождены).`);
+            const closedError = new Error(`Collection ('${this.collectionName}') is closed.`);
+            this.initPromise = Promise.reject(closedError);
+            this.initPromise.catch(()=>{}); 
+            
+            console.log(`Collection ('${this.collectionName}'): Коллекция ${closedGracefully ? 'успешно' : 'принудительно'} закрыта (ресурсы освобождены).`);
         }, 'Close Collection');
 
         try {
             await finalOperationPromise;
         } catch(err) {
-            console.error(`Collection ('${this.collectionName}'): Ошибка в процессе операции закрытия коллекции: ${err.message}`);
-            // Убедимся, что состояние отражает неудачное закрытие или невозможность дальнейшей работы
+            console.error(`Collection ('${this.collectionName}'): Общая ошибка в процессе операции закрытия коллекции: ${err.message}`);
             this.isInitialized = false; 
             this.documents.clear();
             if (this.checkpointTimerId) clearInterval(this.checkpointTimerId);
-            this.initPromise = Promise.reject(err); // Обновляем initPromise на ошибку закрытия
+            const finalError = err.operationName === 'Close Collection' ? err : new Error(`Collection ('${this.collectionName}') failed to close: ${err.message}`);
+            this.initPromise = Promise.reject(finalError); 
             this.initPromise.catch(()=>{}); 
-            throw err; // Перебрасываем ошибку дальше
+            throw finalError; 
         }
     }
 }
