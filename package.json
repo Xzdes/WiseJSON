@@ -1,6 +1,6 @@
 {
   "name": "wise-json-db",
-  "version": "1.1.0", 
+  "version": "2.1.0", 
   "description": "Легковесная, встраиваемая JSON база данных на чистом JavaScript для Node.js, с сегментацией и надежной записью.",
   "main": "wise-json/index.js", 
   "scripts": {
@@ -27,7 +27,6 @@
   },
   "homepage": "https://github.com/Xzdes/WiseJSON#readme", 
   "dependencies": {
-    "uuid": "^11.1.0"
   },
   "devDependencies": { 
   },

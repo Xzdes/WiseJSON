@@ -3,417 +3,345 @@ const fs = require('fs/promises');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 
-const DEFAULT_MAX_SEGMENT_SIZE_BYTES = 1 * 1024 * 1024; // 1MB
-const DEFAULT_JSON_INDENT = 2; // 2 пробела для форматирования, null для компактного JSON
+const WalManager = require('./wal-manager.js');
+const CheckpointManager = require('./checkpoint-manager.js');
+const StorageUtils = require('./storage-utils.js');
 
-/**
- * Класс для управления коллекцией документов, хранящихся в JSON-сегментах.
- * Обеспечивает надежную запись, автоматическую сегментацию и асинхронный API.
- */
+const DEFAULT_JSON_INDENT = 2;
+const DEFAULT_MAX_SEGMENT_SIZE_BYTES = 1 * 1024 * 1024;
+const DEFAULT_CHECKPOINT_INTERVAL_MS = 5 * 60 * 1000;
+const DEFAULT_MAX_WAL_ENTRIES_BEFORE_CHECKPOINT = 1000;
+const DEFAULT_WAL_FORCE_SYNC = false; 
+const DEFAULT_CHECKPOINTS_TO_KEEP = 2;
+
 class Collection {
-    /**
-     * Создает экземпляр Collection.
-     * @param {string} collectionName - Имя коллекции.
-     * @param {string} dbDirectoryPath - Путь к корневой директории базы данных.
-     * @param {object} [options={}] - Опции для коллекции.
-     * @param {number} [options.maxSegmentSizeBytes=1048576] - Максимальный размер файла-сегмента в байтах.
-     * @param {number|null} [options.jsonIndent=2] - Отступ для форматирования JSON или null/0 для компактного вывода.
-     * @param {function():string} [options.idGenerator] - Функция для генерации ID документов (по умолчанию uuidv4).
-     */
     constructor(collectionName, dbDirectoryPath, options = {}) {
         this.collectionName = collectionName;
-        this.collectionDirectoryPath = path.join(dbDirectoryPath, collectionName);
+        this.dbDirectoryPath = dbDirectoryPath; 
+        this.collectionDirectoryPath = path.join(dbDirectoryPath, collectionName); 
+        
         this.options = {
-            maxSegmentSizeBytes: options.maxSegmentSizeBytes || DEFAULT_MAX_SEGMENT_SIZE_BYTES,
             jsonIndent: options.jsonIndent !== undefined ? options.jsonIndent : DEFAULT_JSON_INDENT,
-            idGenerator: options.idGenerator || (() => uuidv4())
+            idGenerator: options.idGenerator || (() => uuidv4()),
+            maxSegmentSizeBytes: options.maxSegmentSizeBytes || DEFAULT_MAX_SEGMENT_SIZE_BYTES,
+            checkpointIntervalMs: options.checkpointIntervalMs !== undefined ? options.checkpointIntervalMs : DEFAULT_CHECKPOINT_INTERVAL_MS,
+            maxWalEntriesBeforeCheckpoint: options.maxWalEntriesBeforeCheckpoint !== undefined ? options.maxWalEntriesBeforeCheckpoint : DEFAULT_MAX_WAL_ENTRIES_BEFORE_CHECKPOINT,
+            walForceSync: options.walForceSync !== undefined ? options.walForceSync : DEFAULT_WAL_FORCE_SYNC,
+            checkpointsToKeep: (options.checkpointsToKeep !== undefined && Number.isInteger(options.checkpointsToKeep) && options.checkpointsToKeep >= 1) 
+                                ? options.checkpointsToKeep 
+                                : DEFAULT_CHECKPOINTS_TO_KEEP,
         };
 
-        /** @private Текущий индекс активного сегмента для записи. */
-        this.currentSegmentIndex = 0;
-        /** @private Промис, используемый для организации очереди операций записи. */
+        this.documents = new Map();
+        this.walPath = WalManager.getWalPath(this.collectionDirectoryPath, this.collectionName);
+        this.checkpointsDirPath = CheckpointManager.getCheckpointsPath(this.collectionDirectoryPath);
+
         this.writeQueue = Promise.resolve();
-        /** @private Флаг, указывающий, завершена ли инициализация коллекции. */
         this.isInitialized = false;
-        /** @private Промис, представляющий процесс инициализации и восстановления коллекции. */
-        this.initPromise = this._initializeAndRecover();
-        /** @private Объект для хранения слушателей событий. */
+        this.initPromise = null; 
+
+        this.walEntriesCountSinceLastCheckpoint = 0;
+        this.checkpointTimerId = null;
+        this.lastCheckpointTimestamp = null;
+        this.isCheckpointScheduledOrRunning = false;
+
         this._listeners = {};
+        
+        this.initPromise = this._initializeAndRecover();
     }
 
-    /**
-     * Проверяет существование пути в файловой системе.
-     * @private
-     * @param {string} filePath - Путь к файлу или директории.
-     * @returns {Promise<boolean>} true, если путь существует, иначе false.
-     */
-    async _pathExists(filePath) {
-        try {
-            await fs.access(filePath);
-            return true;
-        } catch {
-            return false;
-        }
-    }
-
-    /**
-     * Проверяет, является ли файл валидным JSON-файлом.
-     * @private
-     * @param {string} filePath - Путь к файлу.
-     * @returns {Promise<boolean>} true, если файл существует и содержит валидный JSON, иначе false.
-     */
-    async _isValidJsonFile(filePath) {
-        if (!(await this._pathExists(filePath))) {
-            return false;
-        }
-        try {
-            const content = await fs.readFile(filePath, 'utf-8');
-            JSON.parse(content);
-            return true;
-        } catch {
-            return false;
-        }
-    }
-    
-    /**
-     * Инициализирует директорию коллекции, восстанавливает сегменты при необходимости
-     * и определяет текущий активный сегмент.
-     * @private
-     * @returns {Promise<void>}
-     */
     async _initializeAndRecover() {
         try {
-            await fs.mkdir(this.collectionDirectoryPath, { recursive: true });
-            await this._recoverSegments(); 
-            
-            const segmentFiles = await this._getActualSegmentFiles();
+            await StorageUtils.ensureDirectoryExists(this.collectionDirectoryPath);
+            await WalManager.initializeWal(this.walPath, this.collectionDirectoryPath);
 
-            if (segmentFiles.length > 0) {
-                const lastSegmentName = segmentFiles[segmentFiles.length - 1];
-                const determinedIndex = this._getSegmentIndexFromName(lastSegmentName);
+            const checkpointResult = await CheckpointManager.loadLatestCheckpoint(this.checkpointsDirPath, this.collectionName);
+            this.documents = checkpointResult.documents; 
+            this.lastCheckpointTimestamp = checkpointResult.timestamp; 
 
-                if (determinedIndex === -1) {
-                    console.warn(`WiseJSON Collection ('${this.collectionName}') WARN (_initializeAndRecover): Не удалось определить currentSegmentIndex из последнего файла сегмента "${lastSegmentName}". Файлы в директории: ${segmentFiles.join(', ')}. Устанавливается индекс 0.`);
-                    this.currentSegmentIndex = 0; 
-                } else {
-                    this.currentSegmentIndex = determinedIndex;
-                }
-            } else {
-                // Если нет валидных сегментов после восстановления, создаем начальный пустой сегмент _0.json
-                await this._writeSegmentDataInternal(0, [], true); 
-                this.currentSegmentIndex = 0; 
+            const loadedDocsCount = this.documents.size;
+            console.log(`Collection ('${this.collectionName}'): Загружен чекпоинт от ${this.lastCheckpointTimestamp || 'N/A'}. Документов из чекпоинта: ${loadedDocsCount}.`);
+
+            const walOperations = await WalManager.readWal(this.walPath, this.lastCheckpointTimestamp);
+            let appliedWalOpsCount = 0;
+            for (const entry of walOperations) {
+                this._applyWalEntryToMemory(entry, false); 
+                appliedWalOpsCount++;
             }
+            this.walEntriesCountSinceLastCheckpoint = appliedWalOpsCount; 
+
+            console.log(`Collection ('${this.collectionName}'): Применено ${appliedWalOpsCount} операций из WAL. Всего документов в памяти: ${this.documents.size}.`);
+
+            this._setupAutomaticCheckpoints();
+            
+            CheckpointManager.cleanupOldCheckpoints(this.checkpointsDirPath, this.collectionName, this.options.checkpointsToKeep)
+                .catch(err => console.error(`Collection ('${this.collectionName}'): Ошибка при фоновой очистке старых чекпоинтов: ${err.message}`));
+
             this.isInitialized = true;
+            console.log(`Collection ('${this.collectionName}'): Инициализация успешно завершена.`);
         } catch (error) {
-            // Ошибки здесь уже логируются в _recoverSegments или _writeSegmentDataInternal, если они оттуда
-            // Добавляем более общий контекст, если ошибка не из них
-            const baseMessage = `WiseJSON Collection ('${this.collectionName}') CRITICAL (_initializeAndRecover): Ошибка инициализации`;
-            if (!error.message.startsWith('WiseJSON')) { // Проверяем, чтобы не дублировать префикс
-                 console.error(`${baseMessage}: ${error.message}`, error.stack);
-            }
-            throw error; // Перебрасываем оригинальную или новую ошибку с контекстом
-        }
-    }
-
-    /**
-     * Выполняет процедуру восстановления для каждого базового имени сегмента,
-     * проверяя .json, .bak, и .new файлы.
-     * @private
-     * @returns {Promise<void>}
-     */
-    async _recoverSegments() {
-        let filesInDir;
-        try {
-            filesInDir = await fs.readdir(this.collectionDirectoryPath);
-        } catch (e) {
-            if (e.code === 'ENOENT') return; // Директории нет, нечего восстанавливать
-            console.error(`WiseJSON Collection ('${this.collectionName}') RECOVERY: Ошибка чтения директории "${this.collectionDirectoryPath}" при восстановлении: ${e.message}`);
-            throw e; // Перебрасываем, чтобы _initializeAndRecover обработал
-        }
-
-        const segmentBases = new Set();
-        filesInDir.forEach(f => {
-            const match = f.match(new RegExp(`^(${this.collectionName}_\\d+)(\\.json)?(\\..*)?$`));
-            if (match) segmentBases.add(match[1]);
-        });
-
-        for (const baseName of segmentBases) {
-            const mainP = path.join(this.collectionDirectoryPath, `${baseName}.json`);
-            const bakP = path.join(this.collectionDirectoryPath, `${baseName}.json.bak`);
-            const newP = path.join(this.collectionDirectoryPath, `${baseName}.json.new`);
-            const tmpFiles = filesInDir
-                .filter(f => f.startsWith(`${baseName}.json.tmp.`))
-                .map(f => path.join(this.collectionDirectoryPath, f));
-            
-            try {
-                const mainIsValid = await this._isValidJsonFile(mainP);
-                const bakIsValid = await this._isValidJsonFile(bakP);
-                const newIsValid = await this._isValidJsonFile(newP);
-
-                if (mainIsValid) {
-                    // Основной файл в порядке, удаляем временные и бэкап
-                    if (await this._pathExists(bakP)) await fs.unlink(bakP);
-                    if (await this._pathExists(newP)) await fs.unlink(newP);
-                    for (const tmpP of tmpFiles) if (await this._pathExists(tmpP)) await fs.unlink(tmpP);
-                    continue; 
-                }
-
-                // Основной файл невалиден или отсутствует
-                if (bakIsValid) {
-                    console.warn(`WiseJSON Collection ('${this.collectionName}') RECOVERY: Восстановление "${mainP}" из "${bakP}" для сегмента "${baseName}".`);
-                    if (await this._pathExists(mainP)) await fs.unlink(mainP); // Удаляем поврежденный основной
-                    await fs.rename(bakP, mainP);
-                    if (await this._pathExists(newP)) await fs.unlink(newP); // Удаляем .new, так как .bak приоритетнее и уже восстановлен
-                    for (const tmpP of tmpFiles) if (await this._pathExists(tmpP)) await fs.unlink(tmpP);
-                    continue;
-                }
-
-                if (newIsValid) {
-                    console.warn(`WiseJSON Collection ('${this.collectionName}') RECOVERY: Использование временного файла "${newP}" как основного "${mainP}" для сегмента "${baseName}".`);
-                    if (await this._pathExists(mainP)) await fs.unlink(mainP); // Удаляем поврежденный основной (если он был)
-                    if (await this._pathExists(bakP)) await fs.unlink(bakP);  // .bak невалиден или отсутствует, .new - лучший кандидат
-                    await fs.rename(newP, mainP);
-                    for (const tmpP of tmpFiles) if (await this._pathExists(tmpP)) await fs.unlink(tmpP);
-                    continue;
-                }
-                
-                // Нет валидных файлов для восстановления этого сегмента
-                console.warn(`WiseJSON Collection ('${this.collectionName}') RECOVERY: Для сегмента "${baseName}" не найдено валидных файлов для восстановления. Удаление всех остатков (.json, .bak, .new, .tmp).`);
-                if (await this._pathExists(mainP)) await fs.unlink(mainP);
-                if (await this._pathExists(bakP)) await fs.unlink(bakP);
-                if (await this._pathExists(newP)) await fs.unlink(newP);
-                for (const tmpP of tmpFiles) if (await this._pathExists(tmpP)) await fs.unlink(tmpP);
-
-            } catch (error) {
-                console.error(`WiseJSON Collection ('${this.collectionName}') RECOVERY ERROR: Ошибка при обработке файлов для сегмента "${baseName}": ${error.message}`, error.stack);
-                // Не перебрасываем ошибку здесь, чтобы попытаться восстановить другие сегменты
-            }
-        }
-    }
-
-    /**
-     * Гарантирует, что коллекция была инициализирована перед выполнением операций.
-     * @private
-     * @returns {Promise<void>}
-     */
-    async _ensureInitialized() {
-        if (!this.isInitialized) {
-            // initPromise может быть отклонен, и эта ошибка будет передана дальше
-            await this.initPromise;
-        }
-    }
-
-    /**
-     * Возвращает полный путь к файлу сегмента по его индексу.
-     * @private
-     * @param {number} index - Индекс сегмента.
-     * @returns {string} Полный путь к файлу сегмента.
-     */
-    _getSegmentPath(index) {
-        return path.join(this.collectionDirectoryPath, `${this.collectionName}_${index}.json`);
-    }
-
-    /**
-     * Извлекает индекс сегмента из имени файла.
-     * @private
-     * @param {string} fileNameWithExt - Имя файла с расширением (например, "mycollection_0.json").
-     * @returns {number} Индекс сегмента или -1, если имя файла не соответствует шаблону.
-     */
-    _getSegmentIndexFromName(fileNameWithExt) {
-        const justName = path.basename(fileNameWithExt, '.json');
-        const match = justName.match(new RegExp(`^${this.collectionName}_(\\d+)$`));
-        return match ? parseInt(match[1], 10) : -1;
-    }
-
-    /**
-     * Получает отсортированный список имен файлов актуальных сегментов (.json) в директории коллекции.
-     * @private
-     * @returns {Promise<string[]>} Массив имен файлов сегментов, отсортированных по индексу.
-     * @throws {Error} Если произошла ошибка чтения директории (кроме ENOENT).
-     */
-    async _getActualSegmentFiles() { 
-        try {
-            const files = await fs.readdir(this.collectionDirectoryPath);
-            return files
-                .filter(file => file.startsWith(`${this.collectionName}_`) && file.endsWith('.json'))
-                .sort((a, b) => {
-                    const indexA = this._getSegmentIndexFromName(a);
-                    const indexB = this._getSegmentIndexFromName(b);
-                    return indexA - indexB; // Сортировка по возрастанию индекса
-                });
-        } catch (error) {
-            if (error.code === 'ENOENT') return []; // Директория еще не создана или была удалена
-            // Другие ошибки чтения директории являются проблемами
-            const errorMessage = `WiseJSON Collection ('${this.collectionName}') ERROR (_getActualSegmentFiles): Ошибка чтения директории "${this.collectionDirectoryPath}": ${error.message}`;
+            const errorMessage = `Collection ('${this.collectionName}') CRITICAL: Ошибка инициализации: ${error.message}`;
             console.error(errorMessage, error.stack);
-            throw new Error(errorMessage);
+            this.isInitialized = false; 
+            throw error; 
         }
     }
 
-    /**
-     * Читает и парсит данные из файла сегмента.
-     * @private
-     * @param {number} index - Индекс сегмента.
-     * @returns {Promise<Array<object>>} Массив документов из сегмента. Возвращает пустой массив, если сегмент не найден.
-     * @throws {Error} Если файл сегмента поврежден или нечитаем.
-     */
-    async _readSegmentData(index) {
-        const segmentPath = this._getSegmentPath(index);
-        try {
-            const fileContent = await fs.readFile(segmentPath, 'utf-8');
-            return JSON.parse(fileContent);
-        } catch (error) {
-            if (error.code === 'ENOENT') return []; 
-            const errorMessage = `WiseJSON Collection ('${this.collectionName}'): Сегмент "${segmentPath}" поврежден или нечитаем. (Исходная ошибка: ${error.message})`;
-            // Логируем только если это новая ошибка, а не повторное логирование из _isValidJsonFile
-            if (!error.message.includes("поврежден или нечитаем")) {
-                 console.error(errorMessage, error.stack);
-            }
-            throw new Error(errorMessage);
+    _applyWalEntryToMemory(entry, isLiveOperation = true) {
+        if (!entry || typeof entry.op !== 'string') {
+            console.warn(`Collection ('${this.collectionName}'): Пропущена некорректная WAL-подобная запись (отсутствует 'op'): ${JSON.stringify(entry)}`);
+            return;
         }
-    }
-    
-    /**
-     * Записывает данные в файл сегмента, используя стратегию .new -> .bak -> rename для надежности.
-     * @private
-     * @param {number} index - Индекс сегмента.
-     * @param {Array<object>} data - Массив документов для записи.
-     * @param {boolean} [isBrandNewSegmentFile=false] - Флаг, указывающий, создается ли этот файл сегмента впервые (не требует .bak).
-     * @returns {Promise<number>} Размер записанных данных в байтах.
-     * @throws {Error} Если произошла ошибка при записи или операциях с файлами.
-     */
-    async _writeSegmentDataInternal(index, data, isBrandNewSegmentFile = false) {
-        const segmentPath = this._getSegmentPath(index);      
-        const newPath = `${segmentPath}.new`;      
-        const bakPath = `${segmentPath}.bak`;      
         
-        let backupAttemptedAndMainExisted = false; 
-                                            
-        try {
-            const mainOriginallyExisted = await this._pathExists(segmentPath);
+        const opTimestamp = entry.ts || (isLiveOperation ? new Date().toISOString() : null);
+        if (!opTimestamp && isLiveOperation) {
+             console.warn(`Collection ('${this.collectionName}'): Для живой операции (${entry.op}) отсутствует временная метка, используется текущее время.`);
+        }
 
-            const jsonData = JSON.stringify(data, null, this.options.jsonIndent);
-            await fs.writeFile(newPath, jsonData, 'utf-8');
-
-            if (!isBrandNewSegmentFile && mainOriginallyExisted) {
-                backupAttemptedAndMainExisted = true;
-                try {
-                    if (await this._pathExists(bakPath)) await fs.unlink(bakPath);
-                    await fs.rename(segmentPath, bakPath);
-                } catch (bakError) {
-                    const errorMsg = `WiseJSON Collection ('${this.collectionName}') WRITE ERROR: Ошибка создания .bak для "${segmentPath}": ${bakError.message}. Откат: удаление ${newPath}.`;
-                    console.error(errorMsg, bakError.stack);
-                    try { await fs.unlink(newPath); } catch {} 
-                    throw new Error(errorMsg); // Перебрасываем новую ошибку с контекстом
+        switch (entry.op) {
+            case 'INSERT':
+                if (entry.doc && typeof entry.doc._id === 'string') {
+                    const docToStore = { ...entry.doc };
+                    if (isLiveOperation) { 
+                        if (!docToStore.createdAt && opTimestamp) docToStore.createdAt = opTimestamp;
+                        if (!docToStore.updatedAt && opTimestamp) docToStore.updatedAt = opTimestamp;
+                    } else { 
+                        if (!docToStore.createdAt) docToStore.createdAt = entry.doc.createdAt || opTimestamp;
+                        if (!docToStore.updatedAt) docToStore.updatedAt = entry.doc.updatedAt || opTimestamp;
+                    }
+                    this.documents.set(docToStore._id, docToStore);
+                } else {
+                     console.warn(`Collection ('${this.collectionName}'): Пропущена INSERT запись из-за отсутствия 'doc' или 'doc._id': ${JSON.stringify(entry)}`);
                 }
-            }
-
-            try {
-                await fs.rename(newPath, segmentPath);
-            } catch (finalRenameError) {
-                const errorMsg = `WiseJSON Collection ('${this.collectionName}') WRITE ERROR: Ошибка переименования .new в "${segmentPath}": ${finalRenameError.message}. Попытка отката.`;
-                console.error(errorMsg, finalRenameError.stack);
-                if (backupAttemptedAndMainExisted && await this._pathExists(bakPath)) { 
-                    try {
-                        // Если основной файл поврежден после неудачного rename, удаляем его перед восстановлением .bak
-                        if(await this._pathExists(segmentPath) && !(await this._isValidJsonFile(segmentPath))) {
-                             try { await fs.unlink(segmentPath); } catch (e) { if (e.code !== 'ENOENT') console.error(`WiseJSON Collection ('${this.collectionName}') WRITE WARN: Не удалось удалить ${segmentPath} перед восстановлением .bak`, e.message); }
-                        } else if (await this._pathExists(segmentPath)) {
-                            // Основной файл существует и, возможно, валиден (если rename .new упал не из-за этого)
-                        }
-                        await fs.rename(bakPath, segmentPath); 
-                        console.warn(`WiseJSON Collection ('${this.collectionName}') WRITE: Успешно восстановлен .bak для "${segmentPath}".`);
-                    } catch (restoreError) {
-                        console.error(`WiseJSON Collection ('${this.collectionName}') WRITE CRITICAL: Ошибка восстановления .bak для "${segmentPath}": ${restoreError.message}.`);
-                        // Здесь можно было бы добавить исходную ошибку finalRenameError в сообщение restoreError, но это усложнит
+                break;
+            case 'UPDATE':
+                if (typeof entry.id === 'string' && this.documents.has(entry.id) && entry.data && typeof entry.data === 'object') {
+                    const existingDoc = this.documents.get(entry.id);
+                    const updatedDoc = { ...existingDoc, ...entry.data };
+                    
+                    if (entry.data.updatedAt) { // Если в данных операции есть updatedAt, он приоритетнее
+                        updatedDoc.updatedAt = entry.data.updatedAt;
+                    } else if (opTimestamp) { // Иначе используем общий timestamp операции
+                        updatedDoc.updatedAt = opTimestamp;
+                    }
+                    this.documents.set(entry.id, updatedDoc);
+                } else {
+                    if (typeof entry.id === 'string' && !this.documents.has(entry.id)) {
+                        // console.log(`Collection ('${this.collectionName}'): Документ с ID '${entry.id}' не найден в памяти для операции UPDATE.`);
+                    } else {
+                        console.warn(`Collection ('${this.collectionName}'): Пропущена UPDATE запись для ID '${entry.id}' (некорректные данные или ID): ${JSON.stringify(entry)}`);
                     }
                 }
-                try { await fs.unlink(newPath); } catch (e){ if(e.code !== 'ENOENT') console.error(`WiseJSON Collection ('${this.collectionName}') WRITE ERROR: Не удалось удалить ${newPath} при откате финального rename: ${e.message}`);}
-                throw new Error(errorMsg); // Перебрасываем новую ошибку с контекстом
-            }
-
-            // Успешная запись, удаляем .bak, если он был создан
-            if (backupAttemptedAndMainExisted && await this._pathExists(bakPath)) {
-                try { await fs.unlink(bakPath); } catch (e) { if (e.code !== 'ENOENT') console.warn(`WiseJSON Collection ('${this.collectionName}') WRITE WARN: Не удалось удалить ${bakPath} после успешной записи: ${e.message}`); }
-            }
-            return Buffer.byteLength(jsonData, 'utf8');
-        } catch (error) {
-            // Если ошибка не из этого метода, она уже содержит префикс или будет обернута выше
-            // Попытка удалить .new, если он мог остаться
-            if (await this._pathExists(newPath) && (error.path !== newPath || (error.syscall && error.syscall !== 'unlink'))) {
-                 try { await fs.unlink(newPath); } catch {}
-            }
-            // Если это уже ошибка с префиксом, не оборачиваем ее снова
-            if (error.message.startsWith(`WiseJSON Collection ('${this.collectionName}')`)) {
-                throw error;
-            }
-            // Оборачиваем неизвестные ошибки
-            const wrapperErrorMsg = `WiseJSON Collection ('${this.collectionName}') _writeSegmentDataInternal: ${error.message}`;
-            // console.error(wrapperErrorMsg, error.stack); // Логирование может быть избыточным, если ошибка уже залогирована выше
-            throw new Error(wrapperErrorMsg);
+                break;
+            case 'REMOVE':
+                if (typeof entry.id === 'string') {
+                    this.documents.delete(entry.id);
+                } else {
+                     console.warn(`Collection ('${this.collectionName}'): Пропущена REMOVE запись из-за отсутствия или некорректного ID: ${JSON.stringify(entry)}`);
+                }
+                break;
+            case 'CLEAR':
+                this.documents.clear();
+                break;
+            default:
+                console.warn(`Collection ('${this.collectionName}'): Обнаружена неизвестная операция '${entry.op}' при применении к памяти.`);
         }
     }
     
-    /**
-     * Добавляет асинхронную операцию записи в очередь для последовательного выполнения.
-     * @private
-     * @param {function():Promise<any>} operationFn - Функция, выполняющая операцию записи и возвращающая промис.
-     * @returns {Promise<any>} Промис, который разрешается результатом выполнения operationFn.
-     */
-    _enqueueWriteOperation(operationFn) {
-        const operationPromise = this.writeQueue
-            .catch(prevErrInQueue => {
-                // Это информационное сообщение, не ошибка самой очереди
-                console.warn(`WiseJSON Collection ('${this.collectionName}') Info: Предыдущая операция в очереди завершилась с ошибкой: ${prevErrInQueue.message}. Запускаем следующую...`);
-                return Promise.resolve(); // Не прерываем очередь из-за ошибки предыдущей операции
-            })
-            .then(() => this._ensureInitialized()) 
-            .then(() => operationFn()) // Выполняем текущую операцию
-            .catch(currentOperationError => {
-                // Ошибка текущей операции будет возвращена вызывающему коду.
-                // Если она еще не имеет нашего префикса, добавляем его.
-                if (!currentOperationError.message.startsWith(`WiseJSON Collection ('${this.collectionName}')`)) {
-                    const descriptiveError = new Error(`WiseJSON Collection ('${this.collectionName}'): ${currentOperationError.message}`);
-                    descriptiveError.stack = currentOperationError.stack; // Сохраняем оригинальный стек
-                    return Promise.reject(descriptiveError);
-                }
-                return Promise.reject(currentOperationError);
-            });
-        this.writeQueue = operationPromise; 
-        return operationPromise;
+    async _performCheckpoint() {
+        if (!this.isInitialized) {
+            const msg = `Collection ('${this.collectionName}'): Попытка выполнить чекпоинт на неинициализированной коллекции.`;
+            console.warn(msg); 
+            return null;
+        }
+        
+        const documentsSnapshot = new Map(this.documents); 
+        const checkpointAttemptTs = new Date().toISOString(); 
+        const walCountAtCheckpointStart = this.walEntriesCountSinceLastCheckpoint;
+
+        console.log(`Collection ('${this.collectionName}'): Начало выполнения чекпоинта (попытка ts: ${checkpointAttemptTs}). Записей WAL с последнего чекпоинта: ${walCountAtCheckpointStart}.`);
+        
+        try {
+            const checkpointMeta = await CheckpointManager.performCheckpoint(
+                this.checkpointsDirPath,
+                this.collectionName,
+                documentsSnapshot, 
+                checkpointAttemptTs, 
+                this.options
+            );
+
+            await WalManager.processWalAfterCheckpoint(this.walPath, checkpointAttemptTs);
+            
+            this.walEntriesCountSinceLastCheckpoint = Math.max(0, this.walEntriesCountSinceLastCheckpoint - walCountAtCheckpointStart);
+            this.lastCheckpointTimestamp = checkpointMeta.timestamp; 
+
+            console.log(`Collection ('${this.collectionName}'): Чекпоинт успешно создан и WAL обработан (ts: ${checkpointMeta.timestamp}). Оставшиеся WAL записи для след. чекпоинта: ${this.walEntriesCountSinceLastCheckpoint}`);
+
+             CheckpointManager.cleanupOldCheckpoints(this.checkpointsDirPath, this.collectionName, this.options.checkpointsToKeep)
+                .catch(err => console.error(`Collection ('${this.collectionName}'): Ошибка при фоновой очистке старых чекпоинтов после успешного чекпоинта: ${err.message}`));
+
+            return checkpointMeta.timestamp;
+        } catch (error) {
+            const errorMessage = `Collection ('${this.collectionName}') ERROR: Критическая ошибка во время выполнения чекпоинта (попытка ts: ${checkpointAttemptTs}): ${error.message}`;
+            console.error(errorMessage, error.stack);
+            throw new Error(errorMessage); 
+        }
     }
 
-    /**
-     * Эмитирует событие для всех подписанных слушателей.
-     * Слушатели выполняются асинхронно и их ошибки логируются, не прерывая основной поток.
-     * @private
-     * @param {string} eventName - Имя события.
-     * @param  {...any} args - Аргументы для передачи слушателям.
-     */
+    _triggerCheckpointIfRequired(operationName = 'after data modification') {
+        if (
+            this.isInitialized &&
+            !this.isCheckpointScheduledOrRunning && 
+            this.options.maxWalEntriesBeforeCheckpoint > 0 &&
+            this.walEntriesCountSinceLastCheckpoint >= this.options.maxWalEntriesBeforeCheckpoint
+        ) {
+            console.log(`Collection ('${this.collectionName}'): Достигнут лимит WAL (${this.walEntriesCountSinceLastCheckpoint}/${this.options.maxWalEntriesBeforeCheckpoint}) после '${operationName}', ставим чекпоинт в очередь.`);
+            
+            this.isCheckpointScheduledOrRunning = true;
+
+            this._enqueueInternalOperation(
+                async () => { 
+                    try {
+                        await this._performCheckpoint();
+                    } finally {
+                        this.isCheckpointScheduledOrRunning = false; 
+                    }
+                },
+                'Automatic Checkpoint by WAL limit'
+            ).catch(cpError => { 
+                this.isCheckpointScheduledOrRunning = false; 
+            });
+        }
+    }
+    
+    _setupAutomaticCheckpoints() {
+        if (this.checkpointTimerId) {
+            clearInterval(this.checkpointTimerId);
+            this.checkpointTimerId = null;
+        }
+        const intervalMs = this.options.checkpointIntervalMs;
+        if (intervalMs > 0 && intervalMs !== Infinity) {
+            this.checkpointTimerId = setInterval(() => {
+                if (this.isInitialized && !this.isCheckpointScheduledOrRunning && this.walEntriesCountSinceLastCheckpoint > 0) {
+                     console.log(`Collection ('${this.collectionName}'): Автоматический чекпоинт по интервалу (${intervalMs}ms).`);
+                     this.isCheckpointScheduledOrRunning = true;
+
+                     this._enqueueInternalOperation(async () => {
+                        try {
+                            await this._performCheckpoint();
+                        } finally {
+                            this.isCheckpointScheduledOrRunning = false;
+                        }
+                     }, 'Automatic Checkpoint by Interval').catch(err => {
+                        this.isCheckpointScheduledOrRunning = false; 
+                     });
+                }
+            }, intervalMs);
+            if (this.checkpointTimerId && typeof this.checkpointTimerId.unref === 'function') {
+                this.checkpointTimerId.unref(); // Не мешаем процессу завершиться
+            }
+        }
+    }
+
+    _enqueueInternalOperation(operationFn, operationName = 'Internal Operation') {
+        const promise = this.writeQueue
+            .catch(prevErrInQueue => { 
+                const prevOpName = prevErrInQueue && prevErrInQueue.operationName ? prevErrInQueue.operationName : 'unknown';
+                console.warn(`Collection ('${this.collectionName}') Info (для '${operationName}'): Предыдущая операция в очереди ('${prevOpName}') завершилась ошибкой: ${prevErrInQueue ? prevErrInQueue.message : 'Unknown error'}`);
+            })
+            .then(() => this._ensureInitialized()) 
+            .then(async () => { 
+                try {
+                    return await operationFn();
+                } catch (currentOperationError) {
+                    if (!currentOperationError.operationName) { 
+                        currentOperationError.operationName = operationName;
+                    }
+                    console.error(`Collection ('${this.collectionName}') ERROR во время выполнения операции '${operationName}': ${currentOperationError.message}`, currentOperationError.stack);
+                    throw currentOperationError; 
+                }
+            });
+            
+        this.writeQueue = promise.catch(err => { /* Подавляем UnhandledPromiseRejectionWarning для this.writeQueue */ });
+        return promise; 
+    }
+    
+    _enqueueDataModification(walEntry, applyToMemoryAndReturnResultFn, eventDetails) {
+        const operationTimestamp = new Date().toISOString();
+        const finalWalEntry = { ts: operationTimestamp, ...walEntry };
+
+        return this._enqueueInternalOperation(async () => {
+            let oldDocSnapshot = null;
+            if (eventDetails && (eventDetails.type === 'UPDATE' || eventDetails.type === 'REMOVE') && typeof eventDetails.id === 'string') {
+                const currentDoc = this.documents.get(eventDetails.id);
+                if (currentDoc) oldDocSnapshot = { ...currentDoc };
+            }
+
+            await WalManager.appendToWal(this.walPath, finalWalEntry, this.options.walForceSync);
+            this.walEntriesCountSinceLastCheckpoint++;
+            
+            this._applyWalEntryToMemory(finalWalEntry, true); 
+            
+            const result = applyToMemoryAndReturnResultFn(oldDocSnapshot); 
+
+            if (eventDetails) {
+                let eventArg1 = result, eventArg2; 
+                if (eventDetails.type === 'INSERT') {
+                    eventArg1 = result; 
+                } else if (eventDetails.type === 'UPDATE') {
+                    eventArg1 = result; 
+                    eventArg2 = oldDocSnapshot; 
+                } else if (eventDetails.type === 'REMOVE') {
+                    eventArg1 = eventDetails.id;
+                    eventArg2 = oldDocSnapshot; 
+                    if (!result) return result; 
+                } else if (eventDetails.type === 'CLEAR') {
+                    // No specific args for clear beyond event name
+                }
+                 this._emit(`after${eventDetails.type.charAt(0).toUpperCase() + eventDetails.type.slice(1).toLowerCase()}`, eventArg1, eventArg2);
+            }
+
+            this._triggerCheckpointIfRequired(`Data Modification (${finalWalEntry.op})`);
+            
+            return result;
+        }, `Data Modification (${finalWalEntry.op} for ID: ${finalWalEntry.id || (finalWalEntry.doc && finalWalEntry.doc._id) || 'N/A'})`);
+    }
+
+    async _ensureInitialized() {
+        if (!this.initPromise) {
+            const msg = `Collection ('${this.collectionName}'): Критическая ошибка - initPromise отсутствует. Конструктор мог не завершиться.`;
+            console.error(msg);
+            throw new Error(msg);
+        }
+        await this.initPromise; 
+        if (!this.isInitialized) {
+            const msg = `Collection ('${this.collectionName}'): Инициализация не удалась (isInitialized=false), но initPromise разрешился. Это не должно происходить.`;
+            // Эта ситуация может возникнуть, если initPromise был перехвачен и разрешен где-то выше, несмотря на ошибку.
+            // Но в нашей текущей схеме initPromise должен быть отклонен при ошибке.
+            console.error(msg);
+            throw new Error(msg); 
+        }
+    }
+
     _emit(eventName, ...args) {
         const listeners = this._listeners[eventName];
         if (listeners && listeners.length > 0) {
             listeners.forEach(listener => {
                 try {
-                    Promise.resolve(listener(...args)).catch(listenerError => {
-                        console.error(`WiseJSON Collection ('${this.collectionName}') Event Listener Error: Ошибка в слушателе события '${eventName}': ${listenerError.message}`, listenerError.stack);
+                    Promise.resolve(listener(...args.filter(arg => arg !== undefined))) 
+                        .catch(listenerError => {
+                        console.error(`Collection ('${this.collectionName}') Event Listener Error (event: '${eventName}'): ${listenerError.message}`, listenerError.stack);
                     });
                 } catch (syncError) { 
-                    console.error(`WiseJSON Collection ('${this.collectionName}') Event Listener Error: Синхронная ошибка при вызове слушателя события '${eventName}': ${syncError.message}`, syncError.stack);
+                    console.error(`Collection ('${this.collectionName}') Event Listener Error (event: '${eventName}'): Синхронная ошибка при вызове: ${syncError.message}`, syncError.stack);
                 }
             });
         }
     }
-
-    /**
-     * Подписывает функцию-слушатель на событие коллекции.
-     * @param {'afterInsert'|'afterUpdate'|'afterRemove'} eventName - Имя события.
-     * @param {function(...any):void|Promise<void>} listener - Функция-слушатель.
-     * @throws {Error} Если слушатель не является функцией.
-     */
+        
     on(eventName, listener) {
         if (typeof listener !== 'function') {
-            throw new Error(`WiseJSON Collection ('${this.collectionName}'): Слушатель должен быть функцией.`);
+            throw new Error(`Collection ('${this.collectionName}'): Слушатель для события '${eventName}' должен быть функцией.`);
         }
         if (!this._listeners[eventName]) {
             this._listeners[eventName] = [];
@@ -421,403 +349,371 @@ class Collection {
         this._listeners[eventName].push(listener);
     }
 
-    /**
-     * Отписывает функцию-слушатель от события коллекции.
-     * Если слушатель не указан, отписывает всех слушателей для данного события.
-     * @param {'afterInsert'|'afterUpdate'|'afterRemove'} eventName - Имя события.
-     * @param {function} [listener] - Функция-слушатель для удаления.
-     */
     off(eventName, listener) {
         if (!this._listeners[eventName]) {
             return;
         }
-        if (!listener) { // Если слушатель не указан, удаляем всех для этого события
+        if (!listener) {
             delete this._listeners[eventName];
         } else {
             this._listeners[eventName] = this._listeners[eventName].filter(l => l !== listener);
             if (this._listeners[eventName].length === 0) {
-                delete this._listeners[eventName]; // Удаляем массив, если он стал пустым
+                delete this._listeners[eventName];
             }
         }
     }
+    
+    async insert(dataObject) {
+        await this._ensureInitialized();
+        if (!dataObject || typeof dataObject !== 'object' || Array.isArray(dataObject)) {
+            throw new Error(`Collection ('${this.collectionName}'): dataObject для insert должен быть объектом.`);
+        }
+        
+        const docId = (typeof dataObject._id === 'string' && dataObject._id.length > 0) 
+            ? dataObject._id 
+            : this.options.idGenerator();
+        const ts = new Date().toISOString();
 
-    /**
-     * Внутренний метод для вставки нового документа без постановки в очередь.
-     * Вызывается из _enqueueWriteOperation.
-     * @private
-     * @param {object} itemDataToInsert - Данные для нового документа (уже очищенные от пользовательских _id, createdAt, updatedAt).
-     * @returns {Promise<object>} Вставленный документ с системными полями.
-     */
-    async _rawInsert(itemDataToInsert) {
-        const newItem = {
-            _id: itemDataToInsert._id || this.options.idGenerator(),
-            ...itemDataToInsert,
-            createdAt: itemDataToInsert.createdAt || new Date().toISOString(),
-            updatedAt: itemDataToInsert.updatedAt || new Date().toISOString(),
+        const newDoc = { 
+            ...dataObject, 
+            _id: docId,    
+            createdAt: typeof dataObject.createdAt === 'string' ? dataObject.createdAt : ts,
+            updatedAt: typeof dataObject.updatedAt === 'string' ? dataObject.updatedAt : ts,
         };
-        newItem._id = newItem._id; 
-        newItem.createdAt = newItem.createdAt;
-        newItem.updatedAt = newItem.updatedAt;
 
-        let currentSegmentData = await this._readSegmentData(this.currentSegmentIndex);
-        const isCurrentSegmentEmpty = currentSegmentData.length === 0;
+        const walEntry = { op: 'INSERT', doc: { ...newDoc } }; // ts будет добавлен в _enqueueDataModification
 
-        // Проверка размера сегмента перед добавлением
-        const tempNewDataForSizeCheck = [...currentSegmentData, newItem];
-        const jsonDataSize = Buffer.byteLength(JSON.stringify(tempNewDataForSizeCheck, null, this.options.jsonIndent), 'utf8');
-
-        if (jsonDataSize > this.options.maxSegmentSizeBytes && !isCurrentSegmentEmpty) { // Создаем новый сегмент только если текущий не пуст
-            this.currentSegmentIndex++;
-            // Записываем новый элемент в новый сегмент
-            await this._writeSegmentDataInternal(this.currentSegmentIndex, [newItem], true); 
-        } else {
-            // Добавляем в текущий сегмент
-            currentSegmentData.push(newItem);
-            // Если это первая запись в самый первый сегмент (index 0), то он считается "новым" файлом
-            const isEffectivelyNewFile = this.currentSegmentIndex === 0 && isCurrentSegmentEmpty;
-            await this._writeSegmentDataInternal(this.currentSegmentIndex, currentSegmentData, isEffectivelyNewFile);
-        }
-        this._emit('afterInsert', { ...newItem });
-        return newItem;
+        return this._enqueueDataModification(
+            walEntry, 
+            () => { 
+                // _applyWalEntryToMemory уже была вызвана. newDoc содержит финальное состояние.
+                return { ...newDoc }; 
+            },
+            { type: 'INSERT', doc: { ...newDoc } } 
+        );
     }
 
-    /**
-     * Внутренний метод для обновления документа без постановки в очередь.
-     * Вызывается из _enqueueWriteOperation.
-     * @private
-     * @param {string} id - ID документа для обновления.
-     * @param {object} updatesToApply - Объект с полями для обновления (уже очищенный от _id, createdAt).
-     * @returns {Promise<object|null>} Обновленный документ или null, если не найден.
-     */
-    async _rawUpdate(id, updatesToApply) {
-        let originalDocumentSnapshot = null; 
-        const segmentFiles = await this._getActualSegmentFiles();
-
-        for (const segmentFileName of segmentFiles) {
-            const segmentIndex = this._getSegmentIndexFromName(segmentFileName);
-            if (segmentIndex === -1) continue;
-
-            let segmentData = await this._readSegmentData(segmentIndex);
-            const itemIndex = segmentData.findIndex(item => item._id === id);
-
-            if (itemIndex !== -1) {
-                originalDocumentSnapshot = { ...segmentData[itemIndex] }; 
-                const updatedItem = {
-                    ...segmentData[itemIndex],
-                    ...updatesToApply, 
-                    updatedAt: new Date().toISOString(),
-                };
-                segmentData[itemIndex] = updatedItem;
-                // Файл сегмента не "новый", так как мы его модифицируем
-                await this._writeSegmentDataInternal(segmentIndex, segmentData, false);
-                this._emit('afterUpdate', { ...updatedItem }, originalDocumentSnapshot);
-                return updatedItem;
-            }
-        }
-        return null;
+    async getById(id) {
+        await this._ensureInitialized();
+        if (typeof id !== 'string' || id.length === 0) return null;
+        const doc = this.documents.get(id);
+        return doc ? { ...doc } : null; 
     }
 
-    /**
-     * Вставляет новый документ в коллекцию.
-     * Поля `_id`, `createdAt`, `updatedAt` будут автоматически сгенерированы/перезаписаны.
-     * Операция добавляется в очередь записи.
-     * @param {object} itemData - Данные для нового документа.
-     * @returns {Promise<object>} - Вставленный документ.
-     */
-    async insert(itemData) {
-        const cleanItemData = { ...itemData };
-        delete cleanItemData._id; 
-        delete cleanItemData.createdAt;
-        delete cleanItemData.updatedAt;
-        return this._enqueueWriteOperation(() => this._rawInsert(cleanItemData));
-    }
-
-    /**
-     * Получает все документы из коллекции.
-     * Операция выполняется немедленно, не вставая в очередь записи.
-     * @returns {Promise<object[]>} - Массив всех документов.
-     */
     async getAll() {
         await this._ensureInitialized();
-        const allItems = [];
-        const segmentFiles = await this._getActualSegmentFiles();
-        for (const segmentFileName of segmentFiles) {
-            const index = this._getSegmentIndexFromName(segmentFileName);
-            if (index === -1) continue;
-            const segmentData = await this._readSegmentData(index);
-            allItems.push(...segmentData);
-        }
-        return allItems;
+        return Array.from(this.documents.values()).map(doc => ({ ...doc }));
     }
 
-    /**
-     * Находит все документы, удовлетворяющие функции-запросу.
-     * Операция выполняется немедленно, не вставая в очередь записи.
-     * @param {function(object):boolean} queryFunction - Функция, принимающая документ и возвращающая true, если он соответствует условию.
-     * @returns {Promise<object[]>} - Массив найденных документов.
-     * @throws {Error} Если queryFunction не является функцией.
-     */
     async find(queryFunction) {
-        if (typeof queryFunction !== 'function') {
-            throw new Error(`WiseJSON Collection ('${this.collectionName}'): queryFunction для find должен быть функцией.`);
-        }
-        const allItems = await this.getAll(); // getAll уже вызывает _ensureInitialized
-        return allItems.filter(queryFunction);
-    }
-
-    /**
-     * Находит первый документ, удовлетворяющий функции-запросу.
-     * Операция выполняется немедленно, не вставая в очередь записи.
-     * @param {function(object):boolean} queryFunction - Функция, принимающая документ и возвращающая true, если он соответствует условию.
-     * @returns {Promise<object|null>} - Найденный документ или null.
-     * @throws {Error} Если queryFunction не является функцией.
-     */
-    async findOne(queryFunction) {
-        if (typeof queryFunction !== 'function') {
-            throw new Error(`WiseJSON Collection ('${this.collectionName}'): queryFunction для findOne должен быть функцией.`);
-        }
         await this._ensureInitialized();
-        const segmentFiles = await this._getActualSegmentFiles();
-        for (const segmentFileName of segmentFiles) {
-            const index = this._getSegmentIndexFromName(segmentFileName);
-            if (index === -1) continue;
-
-            const segmentData = await this._readSegmentData(index);
-            const foundItem = segmentData.find(queryFunction);
-            if (foundItem) {
-                return foundItem;
+        if (typeof queryFunction !== 'function') {
+            throw new Error(`Collection ('${this.collectionName}'): queryFunction для find должен быть функцией.`);
+        }
+        const results = [];
+        for (const doc of this.documents.values()) {
+            if (queryFunction(doc)) { 
+                results.push({ ...doc }); 
+            }
+        }
+        return results;
+    }
+    
+    async findOne(queryFunction) {
+        await this._ensureInitialized();
+         if (typeof queryFunction !== 'function') {
+            throw new Error(`Collection ('${this.collectionName}'): queryFunction для findOne должен быть функцией.`);
+        }
+        for (const doc of this.documents.values()) {
+            if (queryFunction(doc)) { 
+                return { ...doc }; 
             }
         }
         return null;
     }
 
-    /**
-     * Находит документ по его уникальному идентификатору `_id`.
-     * Операция выполняется немедленно, не вставая в очередь записи.
-     * @param {string} id - Уникальный идентификатор документа.
-     * @returns {Promise<object|null>} - Найденный документ или null.
-     * @throws {Error} Если ID не является непустой строкой.
-     */
-    async getById(id) {
-        if (!id || typeof id !== 'string') {
-            throw new Error(`WiseJSON Collection ('${this.collectionName}'): ID для getById должен быть непустой строкой.`);
-        }
-        return this.findOne(item => item._id === id);
-    }
-
-    /**
-     * Обновляет документ с указанным `_id`.
-     * Поля `_id` и `createdAt` не изменяются. `updatedAt` обновляется автоматически.
-     * Операция добавляется в очередь записи.
-     * @param {string} id - `_id` документа для обновления.
-     * @param {object} updates - Объект с полями для обновления.
-     * @returns {Promise<object|null>} - Обновленный документ или null, если документ не найден.
-     */
     async update(id, updates) {
-        const cleanUpdates = { ...updates };
-        if (cleanUpdates._id && cleanUpdates._id !== id) {
-            console.warn(`WiseJSON Collection ('${this.collectionName}'): Попытка изменить _id на '${cleanUpdates._id}' для документа с ID '${id}' при обновлении. Поле _id в объекте updates будет проигнорировано.`);
+        await this._ensureInitialized();
+        if (typeof id !== 'string' || id.length === 0) {
+             throw new Error(`Collection ('${this.collectionName}'): ID для update должен быть непустой строкой.`);
         }
+        if (!updates || typeof updates !== 'object' || Array.isArray(updates)) {
+            throw new Error(`Collection ('${this.collectionName}'): updates для update должен быть объектом.`);
+        }
+
+        // Проверяем, существует ли документ до постановки в очередь, чтобы избежать лишних WAL записей
+        if (!this.documents.has(id)) {
+            return null;
+        }
+
+        const cleanUpdates = { ...updates }; 
         delete cleanUpdates._id; 
-        delete cleanUpdates.createdAt; 
-        return this._enqueueWriteOperation(() => this._rawUpdate(id, cleanUpdates));
+        delete cleanUpdates.createdAt;
+        
+        const updateTimestamp = new Date().toISOString();
+        cleanUpdates.updatedAt = updateTimestamp; // Явно устанавливаем updatedAt для данных, идущих в WAL
+
+        const walEntry = { op: 'UPDATE', id, data: cleanUpdates }; // ts будет добавлен позже
+
+        return this._enqueueDataModification(
+            walEntry,
+            () => { 
+                // _applyWalEntryToMemory уже была вызвана.
+                const updatedDoc = this.documents.get(id); 
+                // Если документ был удален другой операцией между проверкой has(id) и этим моментом,
+                // то updatedDoc будет undefined. _applyWalEntryToMemory для UPDATE не создаст документ.
+                return updatedDoc ? { ...updatedDoc } : null; 
+            },
+            { type: 'UPDATE', id } 
+        );
     }
 
-    /**
-     * Удаляет документ с указанным `_id`.
-     * Операция добавляется в очередь записи.
-     * @param {string} id - `_id` документа для удаления.
-     * @returns {Promise<boolean>} - `true`, если документ был удален, иначе `false`.
-     * @throws {Error} Если ID не является непустой строкой.
-     */
     async remove(id) {
-        return this._enqueueWriteOperation(async () => {
-            if (!id || typeof id !== 'string') {
-                throw new Error(`WiseJSON Collection ('${this.collectionName}'): ID для remove должен быть непустой строкой.`);
-            }
-            let removedDocumentSnapshot = null; 
-            const segmentFiles = await this._getActualSegmentFiles();
-            for (const segmentFileName of segmentFiles) {
-                const segmentIndex = this._getSegmentIndexFromName(segmentFileName);
-                 if (segmentIndex === -1) continue;
+        await this._ensureInitialized();
+        if (typeof id !== 'string' || id.length === 0) {
+             throw new Error(`Collection ('${this.collectionName}'): ID для remove должен быть непустой строкой.`);
+        }
+        
+        // Проверяем существование до постановки в очередь для оптимизации
+        if (!this.documents.has(id)) {
+            return false;
+        }
 
-                let segmentData = await this._readSegmentData(segmentIndex);
-                
-                const originalLength = segmentData.length;
-                const itemToRemoveIndex = segmentData.findIndex(item => item._id === id);
-                
-                if (itemToRemoveIndex !== -1) {
-                    removedDocumentSnapshot = { ...segmentData[itemToRemoveIndex] }; 
-                }
+        const walEntry = { op: 'REMOVE', id }; // ts будет добавлен позже
 
-                const newData = segmentData.filter(item => item._id !== id);
-
-                if (newData.length < originalLength) { 
-                    // Если после удаления сегмент стал пустым и это единственный сегмент _0.json,
-                    // он должен быть помечен как "brand new" (т.е. перезаписан как пустой массив без .bak).
-                    // Однако, если есть другие сегменты, или это не _0.json, то это просто обновление.
-                    // Простейший случай: всегда считать isBrandNewSegmentFile=false при удалении,
-                    // так как мы модифицируем существующий файл.
-                    // Если newData пустой, файл сегмента просто будет содержать `[]`.
-                    await this._writeSegmentDataInternal(segmentIndex, newData, false); 
-                    if (removedDocumentSnapshot) { 
-                        this._emit('afterRemove', id, removedDocumentSnapshot);
-                    }
-                    return true; 
-                }
-            }
-            return false; 
-        });
+        return this._enqueueDataModification(
+            walEntry,
+            (oldSnapshotBeforeApply) => { 
+                // oldSnapshotBeforeApply содержит документ, если он был.
+                // _applyWalEntryToMemory УЖЕ удалила его из this.documents.
+                return !!oldSnapshotBeforeApply; // Возвращаем true, если документ существовал до удаления.
+            },
+            { type: 'REMOVE', id }
+        );
     }
 
-    /**
-     * Подсчитывает количество документов в коллекции.
-     * Может принимать функцию-фильтр для подсчета только соответствующих документов.
-     * Операция выполняется немедленно, не вставая в очередь записи.
-     * @param {function(object):boolean} [queryFunction] - Необязательная функция-фильтр.
-     * @returns {Promise<number>} - Количество документов.
-     */
     async count(queryFunction) {
         await this._ensureInitialized();
-        let documentCount = 0;
-        const segmentFiles = await this._getActualSegmentFiles();
-        for (const segmentFileName of segmentFiles) {
-            const index = this._getSegmentIndexFromName(segmentFileName);
-            if (index === -1) continue;
-
-            const segmentData = await this._readSegmentData(index);
-            if (queryFunction && typeof queryFunction === 'function') {
-                for (const document of segmentData) {
-                    if (queryFunction(document)) {
-                        documentCount++;
-                    }
-                }
-            } else {
-                documentCount += segmentData.length;
+        if (queryFunction === undefined) {
+            return this.documents.size;
+        }
+        if (typeof queryFunction !== 'function') {
+             throw new Error(`Collection ('${this.collectionName}'): queryFunction для count должен быть функцией.`);
+        }
+        let count = 0;
+        for (const doc of this.documents.values()) {
+            if (queryFunction(doc)) {
+                count++;
             }
         }
-        return documentCount;
+        return count;
     }
+    
+    async upsert(query, dataToUpsert, upsertOptions = {}) {
+        await this._ensureInitialized();
+        if (!query || (typeof query !== 'object' && typeof query !== 'function')) {
+            throw new Error(`Collection ('${this.collectionName}'): query для upsert должен быть объектом или функцией.`);
+        }
+        if (!dataToUpsert || typeof dataToUpsert !== 'object' || Array.isArray(dataToUpsert)) {
+            throw new Error(`Collection ('${this.collectionName}'): dataToUpsert для upsert должен быть объектом.`);
+        }
 
-    /**
-     * Обновляет документ, если он найден по `query`, иначе вставляет новый документ.
-     * Операция добавляется в очередь записи.
-     * @param {object|function(object):boolean} query - Объект для точного поиска по полям или функция-предикат.
-     * @param {object} dataToUpsert - Данные для вставки или обновления. Системные поля (`_id`, `createdAt`, `updatedAt`) из этого объекта будут проигнорированы или перезаписаны.
-     * @param {object} [options] - Дополнительные опции.
-     * @param {object} [options.setOnInsert] - Данные, которые будут применены к документу только в случае его вставки (если документ не найден по `query`). Эти поля могут перезаписать поля из `dataToUpsert` или `query` при вставке.
-     * @returns {Promise<{document: object, operation: 'inserted' | 'updated'}>} - Результат операции: вставленный/обновленный документ и тип операции.
-     * @throws {Error} Если `query` или `dataToUpsert` имеют некорректный тип.
-     */
-    async upsert(query, dataToUpsert, options = {}) {
-        return this._enqueueWriteOperation(async () => {
-            if (!query || (typeof query !== 'object' && typeof query !== 'function')) {
-                throw new Error(`WiseJSON Collection ('${this.collectionName}'): query для upsert должен быть объектом или функцией.`);
-            }
-            if (!dataToUpsert || typeof dataToUpsert !== 'object') {
-                throw new Error(`WiseJSON Collection ('${this.collectionName}'): dataToUpsert для upsert должен быть объектом.`);
-            }
-
+        return this._enqueueInternalOperation(async () => {
             const queryFn = typeof query === 'function' ? query : (doc =>
                 Object.keys(query).every(key => doc[key] === query[key])
             );
             
-            const existingDocument = await this.findOne(queryFn); // findOne вызывает _ensureInitialized
-
-            if (existingDocument) {
-                const updatesForRaw = { ...dataToUpsert };
-                delete updatesForRaw._id; 
-                delete updatesForRaw.createdAt;
-                const updatedDocument = await this._rawUpdate(existingDocument._id, updatesForRaw);
-                return { document: updatedDocument, operation: 'updated' };
-            } else {
-                let documentToInsert = {};
-                if (typeof query === 'object' && query !== null && !Array.isArray(query)) { 
-                    documentToInsert = { ...query };
+            let existingDocumentEntry = null; // [id, doc]
+            for (const entry of this.documents.entries()) {
+                if (queryFn(entry[1])) { 
+                    existingDocumentEntry = entry;
+                    break;
                 }
-                documentToInsert = { ...documentToInsert, ...dataToUpsert };
-                if (options.setOnInsert && typeof options.setOnInsert === 'object') {
-                    documentToInsert = { ...documentToInsert, ...options.setOnInsert };
-                }
-                // _rawInsert корректно обработает _id, createdAt, updatedAt
-                const insertedDocument = await this._rawInsert(documentToInsert); 
-                return { document: insertedDocument, operation: 'inserted' };
             }
-        });
+
+            const ts = new Date().toISOString();
+            let operationResult;
+            let finalWalEntry;
+            let eventDetails;
+            let oldDocSnapshotForEvent = null;
+
+            if (existingDocumentEntry) { 
+                const existingId = existingDocumentEntry[0];
+                const existingDoc = existingDocumentEntry[1];
+                oldDocSnapshotForEvent = { ...existingDoc };
+
+                const updatesToApply = { ...dataToUpsert };
+                delete updatesToApply._id; 
+                delete updatesToApply.createdAt;
+                updatesToApply.updatedAt = ts; 
+
+                finalWalEntry = { op: 'UPDATE', id: existingId, data: { ...updatesToApply }, ts };
+                
+                this._applyWalEntryToMemory(finalWalEntry, true);
+                const updatedDocInMemory = this.documents.get(existingId); 
+                
+                operationResult = { document: { ...updatedDocInMemory }, operation: 'updated' };
+                eventDetails = { type: 'UPDATE', doc: updatedDocInMemory };
+
+            } else { 
+                let docToInsert = {};
+                if (typeof query === 'object' && query !== null && !Array.isArray(query)) {
+                    docToInsert = { ...query }; 
+                }
+                docToInsert = { ...docToInsert, ...dataToUpsert }; 
+                if (upsertOptions && upsertOptions.setOnInsert && typeof upsertOptions.setOnInsert === 'object') {
+                    docToInsert = { ...docToInsert, ...upsertOptions.setOnInsert }; 
+                }
+
+                docToInsert._id = (typeof docToInsert._id === 'string' && docToInsert._id.length > 0) 
+                    ? docToInsert._id 
+                    : this.options.idGenerator();
+                docToInsert.createdAt = (typeof docToInsert.createdAt === 'string') ? docToInsert.createdAt : ts;
+                docToInsert.updatedAt = ts;
+                
+                finalWalEntry = { op: 'INSERT', doc: { ...docToInsert }, ts };
+                
+                this._applyWalEntryToMemory(finalWalEntry, true);
+                const insertedDocInMemory = this.documents.get(docToInsert._id); 
+
+                operationResult = { document: { ...insertedDocInMemory }, operation: 'inserted' };
+                eventDetails = { type: 'INSERT', doc: insertedDocInMemory };
+            }
+            
+            await WalManager.appendToWal(this.walPath, finalWalEntry, this.options.walForceSync);
+            this.walEntriesCountSinceLastCheckpoint++;
+
+            if (eventDetails.type === 'INSERT' && eventDetails.doc) {
+                this._emit('afterInsert', eventDetails.doc);
+            } else if (eventDetails.type === 'UPDATE' && eventDetails.doc) {
+                this._emit('afterUpdate', eventDetails.doc, oldDocSnapshotForEvent);
+            }
+            
+            this._triggerCheckpointIfRequired('Upsert Operation');
+            return operationResult;
+
+        }, 'Upsert Operation');
     }
 
-    /**
-     * Получает статистику по коллекции: количество документов, сегментов,
-     * общий размер на диске и текущие опции конфигурации.
-     * Операция выполняется немедленно, не вставая в очередь записи.
-     * @returns {Promise<{documentCount: number, segmentCount: number, totalDiskSizeBytes: number, options: object}>} Статистика коллекции.
-     */
+    async clear() {
+        await this._ensureInitialized();
+        const walEntry = { op: 'CLEAR' };
+        return this._enqueueDataModification(
+            walEntry,
+            () => { /* _applyWalEntryToMemory уже очистила this.documents */ },
+            { type: 'CLEAR' }
+        );
+    }
+    
     async getCollectionStats() {
         await this._ensureInitialized();
-
-        const segmentFiles = await this._getActualSegmentFiles();
-        const segmentCount = segmentFiles.length;
-        let totalDiskSizeBytes = 0;
-        
-        for (const segmentFileName of segmentFiles) {
-            const segmentPath = path.join(this.collectionDirectoryPath, segmentFileName);
-            try {
-                const stats = await fs.stat(segmentPath);
-                totalDiskSizeBytes += stats.size;
-            } catch (error) {
-                console.warn(`WiseJSON Collection ('${this.collectionName}') WARN (getCollectionStats): Не удалось получить размер для сегмента "${segmentPath}": ${error.message}`);
+        let walSizeBytes = 0;
+        let walExists = false;
+        try {
+            if (await StorageUtils.pathExists(this.walPath)) {
+                walExists = true;
+                const stats = await fs.stat(this.walPath);
+                walSizeBytes = stats.size;
             }
-        }
-        
-        const documentCount = await this.count(); 
+        } catch (e) { /* ignore */ }
 
         return {
-            documentCount,
-            segmentCount,
-            totalDiskSizeBytes,
+            collectionName: this.collectionName,
+            documentCount: this.documents.size,
+            isInitialized: this.isInitialized,
+            walPath: this.walPath,
+            walExists,
+            walSizeBytes,
+            walEntriesSinceLastCheckpoint: this.walEntriesCountSinceLastCheckpoint,
+            checkpointsPath: this.checkpointsDirPath,
+            lastCheckpointTimestamp: this.lastCheckpointTimestamp,
             options: { ...this.options } 
         };
     }
+    
+    async save() {
+        await this._ensureInitialized();
+        return this._enqueueInternalOperation(async () => {
+            if (this.isCheckpointScheduledOrRunning) {
+                console.log(`Collection ('${this.collectionName}'): Ручной вызов save(), но чекпоинт уже запланирован или выполняется. Новый чекпоинт не будет запущен.`);
+                return this.lastCheckpointTimestamp; 
+            }
+            // Выполняем чекпоинт, если были изменения с последнего чекпоинта,
+            // или если чекпоинтов еще не было (даже для пустой коллекции),
+            // ИЛИ если есть документы в памяти (на случай, если walEntriesCount был сброшен ошибкой, но данные есть).
+            if (this.walEntriesCountSinceLastCheckpoint > 0 || !this.lastCheckpointTimestamp || (this.documents.size > 0 && !this.lastCheckpointTimestamp) ) {
+                this.isCheckpointScheduledOrRunning = true;
+                try {
+                    return await this._performCheckpoint();
+                } finally {
+                    this.isCheckpointScheduledOrRunning = false;
+                }
+            } else {
+                console.log(`Collection ('${this.collectionName}'): Ручной вызов save(), нет новых WAL записей для чекпоинта или коллекция пуста и уже есть чекпоинт. Последний чекпоинт: ${this.lastCheckpointTimestamp}`);
+                return this.lastCheckpointTimestamp; 
+            }
+        }, 'Manual Save (Checkpoint)');
+    }
 
-    /**
-     * Удаляет все документы из коллекции.
-     * Все существующие файлы сегментов будут перезаписаны пустыми массивами.
-     * Индекс текущего сегмента будет сброшен на 0.
-     * Операция добавляется в очередь записи.
-     * @returns {Promise<void>}
-     */
-    async clear() {
-        return this._enqueueWriteOperation(async () => {
-            const segmentFiles = await this._getActualSegmentFiles();
-            
-            for (const segmentFileName of segmentFiles) {
-                const segmentIndex = this._getSegmentIndexFromName(segmentFileName);
-                if (segmentIndex === -1) continue; // Пропускаем, если имя файла некорректно
+    async close() {
+        console.log(`Collection ('${this.collectionName}'): Попытка закрытия... Ожидание очереди операций.`);
+        
+        const finalOperationPromise = this._enqueueInternalOperation(async () => {
+            // На момент выполнения этой операции в очереди, this.isInitialized должно быть true,
+            // если _ensureInitialized в _enqueueInternalOperation отработал успешно.
+            // Если инициализация упала, _ensureInitialized перебросит ошибку, и мы сюда не дойдем.
 
-                // Перезаписываем каждый сегмент пустым массивом.
-                // Помечаем как "brand new" только если это сегмент _0.json и он единственный,
-                // чтобы избежать ненужного .bak для остальных или если _0.json не пуст.
-                // Проще всего считать, что мы модифицируем файлы, поэтому isBrandNewSegmentFile = false,
-                // кроме случая, когда это самый первый сегмент _0.json, и он единственный.
-                // Однако, для clear() проще просто перезаписать все как существующие.
-                // Если сегмент _0.json единственный, то _writeSegmentDataInternal с isBrandNewSegmentFile=true
-                // создаст его без .bak, если он был удален или пуст.
-                // Здесь, для простоты, мы просто перезаписываем содержимое существующих файлов.
-                await this._writeSegmentDataInternal(segmentIndex, [], false);
+            console.log(`Collection ('${this.collectionName}'): Очередь операций достигла операции закрытия. Приступаем к закрытию.`);
+            if (this.checkpointTimerId) {
+                clearInterval(this.checkpointTimerId);
+                this.checkpointTimerId = null;
+                console.log(`Collection ('${this.collectionName}'): Таймер автоматических чекпоинтов остановлен.`);
             }
 
-            // Если после очистки не осталось сегмента _0.json (маловероятно, если мы только перезаписываем),
-            // или если мы хотим гарантировать его существование:
-            if (!segmentFiles.some(name => this._getSegmentIndexFromName(name) === 0)) {
-                await this._writeSegmentDataInternal(0, [], true);
+            if (this.isInitialized) { 
+                if (this.walEntriesCountSinceLastCheckpoint > 0 || (!this.lastCheckpointTimestamp && (this.documents.size > 0 || await StorageUtils.pathExists(this.walPath) && (await fs.stat(this.walPath)).size > 0) )) {
+                    if (!this.isCheckpointScheduledOrRunning) {
+                        this.isCheckpointScheduledOrRunning = true;
+                        try {
+                            console.log(`Collection ('${this.collectionName}'): Выполнение финального чекпоинта при закрытии.`);
+                            await this._performCheckpoint();
+                        } catch (err) {
+                            console.error(`Collection ('${this.collectionName}'): Ошибка при выполнении финального чекпоинта во время закрытия: ${err.message}`);
+                        } finally {
+                             this.isCheckpointScheduledOrRunning = false;
+                        }
+                    } else {
+                        console.warn(`Collection ('${this.collectionName}'): Финальный чекпоинт пропущен при закрытии, т.к. другой чекпоинт уже выполняется/запланирован.`);
+                    }
+                } else {
+                    console.log(`Collection ('${this.collectionName}'): Нет несохраненных изменений, финальный чекпоинт не требуется при закрытии.`);
+                }
+            } else {
+                 console.log(`Collection ('${this.collectionName}'): Коллекция не была полностью инициализирована, финальный чекпоинт при закрытии пропущен.`);
             }
             
-            this.currentSegmentIndex = 0; // Сбрасываем текущий сегмент на начальный
-            
-            // Здесь можно было бы добавить событие 'afterClear', если нужно
-            // this._emit('afterClear');
-            console.log(`WiseJSON Collection ('${this.collectionName}'): Коллекция очищена.`);
-        });
+            this.isInitialized = false; 
+            this.documents.clear(); 
+            // После закрытия, initPromise должен указывать на то, что коллекция не готова.
+            // Создаем новый отклоненный промис или промис, который говорит, что она закрыта.
+            this.initPromise = Promise.reject(new Error(`Collection ('${this.collectionName}') is closed.`));
+            this.initPromise.catch(()=>{}); // Подавляем UnhandledPromiseRejectionWarning для этого специального промиса
+            console.log(`Collection ('${this.collectionName}'): initPromise установлен в rejected state.`);
+            console.log(`Collection ('${this.collectionName}'): Коллекция успешно закрыта (ресурсы освобождены).`);
+        }, 'Close Collection');
+
+        try {
+            await finalOperationPromise;
+        } catch(err) {
+            console.error(`Collection ('${this.collectionName}'): Ошибка в процессе операции закрытия коллекции: ${err.message}`);
+            // Убедимся, что состояние отражает неудачное закрытие или невозможность дальнейшей работы
+            this.isInitialized = false; 
+            this.documents.clear();
+            if (this.checkpointTimerId) clearInterval(this.checkpointTimerId);
+            this.initPromise = Promise.reject(err); // Обновляем initPromise на ошибку закрытия
+            this.initPromise.catch(()=>{}); 
+            throw err; // Перебрасываем ошибку дальше
+        }
     }
 }
 
