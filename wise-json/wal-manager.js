@@ -21,37 +21,35 @@ function getWalPath(collectionDirPath, collectionName) {
 
 /**
  * Инициализирует WAL. На данном этапе просто проверяет существование директории коллекции.
- * @param {string} walPath - Полный путь к WAL-файлу (используется для получения dirname).
+ * @param {string} walPath - Полный путь к WAL-файлу (используется для получения dirname, если collectionDirPath не передан).
  * @param {string} collectionDirPath - Путь к директории коллекции (для ensureDirectoryExists).
  * @returns {Promise<void>}
  */
 async function initializeWal(walPath, collectionDirPath) {
     // walDir обычно совпадает с collectionDirPath, так как WAL лежит в папке коллекции
-    const walDir = path.dirname(walPath); 
-    await ensureDirectoryExists(walDir); // Убедимся, что директория WAL (папка коллекции) существует
+    const dirToEnsure = collectionDirPath || path.dirname(walPath); 
+    await ensureDirectoryExists(dirToEnsure);
 }
 
 /**
  * Записывает одну операцию в WAL-файл.
+ * Временная метка 'ts' должна быть уже установлена в operationEntry вызывающим кодом.
  * @param {string} walPath - Полный путь к WAL-файлу.
  * @param {object} operationEntry - Объект операции для записи (например, {op: 'INSERT', doc: {...}, ts: '...'}).
  * @param {boolean} [forceSync=false] - Если true, вызывает fsync для гарантии записи на диск.
- *                                     Влияет на производительность.
  * @returns {Promise<void>}
- * @throws {Error} Если произошла ошибка записи.
+ * @throws {Error} Если произошла ошибка записи или отсутствует временная метка в operationEntry.
  */
 async function appendToWal(walPath, operationEntry, forceSync = false) {
-    // Временная метка должна быть установлена вызывающим кодом (в _enqueueDataModification),
-    // чтобы быть консистентной для WAL и для применения к памяти.
-    // Если здесь она отсутствует, это может быть признаком проблемы в логике выше.
     if (!operationEntry.ts) {
-        console.warn(`WalManager: Запись в WAL для операции '${operationEntry.op}' без временной метки (ts). Устанавливается текущее время.`);
-        operationEntry.ts = new Date().toISOString();
+        const errMsg = `WalManager: Попытка записи в WAL для операции '${operationEntry.op}' БЕЗ временной метки (ts). Это критическая ошибка.`;
+        console.error(errMsg, operationEntry);
+        throw new Error(errMsg); 
     }
     const line = JSON.stringify(operationEntry) + '\n';
     let fileHandle;
     try {
-        fileHandle = await fs.open(walPath, 'a'); // 'a' - append mode, creates if not exists
+        fileHandle = await fs.open(walPath, 'a'); 
         await fileHandle.appendFile(line, 'utf-8');
         if (forceSync) {
             await fileHandle.sync(); 
@@ -103,8 +101,6 @@ async function readWal(walPath, sinceTs) {
                 console.warn(`WalManager: Пропущена неполная или поврежденная запись в WAL "${walPath}" (отсутствует op или ts): ${line.substring(0,100)}...`);
                 continue;
             }
-            // Если sinceTs предоставлен, фильтруем записи, которые строго старше.
-            // Записи с ts РАВНЫМ sinceTs ВКЛЮЧАЮТСЯ (т.е. "с этой метки и новее").
             if (sinceTs && entry.ts < sinceTs) { 
                 continue; 
             }
@@ -125,113 +121,102 @@ async function readWal(walPath, sinceTs) {
  * @throws {Error} Если не удалось переименовать существующий WAL или создать/обеспечить новый основной WAL.
  */
 async function prepareWalForCheckpoint(mainWalPath, processingAttemptTs) {
-    const sanitizedTs = processingAttemptTs.replace(/[:.]/g, '-'); // Очищаем метку для имени файла
+    const sanitizedTs = processingAttemptTs.replace(/[:.]/g, '-'); 
     const walToProcessPath = `${mainWalPath}${WAL_PROCESSING_SUFFIX}_${sanitizedTs}`;
     
     if (await pathExists(mainWalPath)) {
         try {
             await fs.rename(mainWalPath, walToProcessPath);
-            console.log(`WalManager: Текущий WAL "${mainWalPath}" переименован в "${walToProcessPath}" для обработки чекпоинтом.`);
+            console.log(`WalManager: Текущий WAL "${path.basename(mainWalPath)}" переименован в "${path.basename(walToProcessPath)}" для обработки чекпоинтом.`);
         } catch (renameError) {
             const errMsg = `WalManager: Не удалось переименовать WAL "${mainWalPath}" в "${walToProcessPath}": ${renameError.message}`;
             console.error(errMsg, renameError.stack);
             throw new Error(errMsg);
         }
     } else {
-        console.log(`WalManager: Основной WAL "${mainWalPath}" не найден при подготовке к чекпоинту. Предполагается, что нет WAL для обработки (создаем пустой ${path.basename(walToProcessPath)}).`);
+        console.log(`WalManager: Основной WAL "${path.basename(mainWalPath)}" не найден при подготовке к чекпоинту. Создаем пустой "${path.basename(walToProcessPath)}" для обработки.`);
         try {
-            // Создаем пустой файл, чтобы последующие шаги, ожидающие этот файл, не падали.
             await fs.writeFile(walToProcessPath, '', 'utf-8');
         } catch (e) {
-            const errMsg = `WalManager: Не удалось создать пустой временный WAL "${walToProcessPath}": ${e.message}`;
-            console.error(errMsg, e.stack);
-            throw new Error(errMsg);
+            const m = `WalManager: Не удалось создать пустой временный WAL "${walToProcessPath}": ${e.message}`;
+            console.error(m, e.stack);
+            throw new Error(m);
         }
     }
 
-    // Гарантируем, что основной WAL-файл (mainWalPath) существует для новых записей
     try {
-        const handle = await fs.open(mainWalPath, 'a'); // 'a' создаст файл, если его нет
+        const handle = await fs.open(mainWalPath, 'a'); 
         await handle.close();
     } catch (createError) {
-        const errMsg = `WalManager: Не удалось создать/обеспечить существование нового основного WAL "${mainWalPath}" после переименования старого: ${createError.message}`;
-        console.error(errMsg, createError.stack);
-        throw new Error(errMsg);
+        const e = `WalManager: Не удалось создать/обеспечить существование нового основного WAL "${mainWalPath}" после переименования старого: ${createError.message}`;
+        console.error(e, createError.stack);
+        throw new Error(e);
     }
-
     return walToProcessPath;
 }
 
 /**
  * Завершает обработку WAL после успешного чекпоинта.
  * Читает временный WAL (`walToProcessPath`), отбирает из него операции, которые строго новее (`>`)
- * временной метки успешно сохраненного чекпоинта, и дописывает их в текущий основной WAL.
+ * временной метки успешно сохраненного чекпоинта, и объединяет их с текущим содержимым основного WAL.
  * Затем временный WAL (`walToProcessPath`) удаляется.
  * @param {string} mainWalPath - Путь к основному (текущему) WAL-файлу.
  * @param {string} walToProcessPath - Путь к временному WAL-файлу, который был заархивирован для чекпоинта.
  * @param {string} actualCheckpointTimestamp - Точная временная метка (ISO строка), когда чекпоинт был успешно сохранен.
- * @param {boolean} walForceSync - Применять ли fsync при дописывании "свежих" операций в `mainWalPath`.
- * @returns {Promise<number>} Количество операций, перенесенных (дописанных) в основной WAL.
+ * @param {boolean} walForceSync - Применять ли fsync при перезаписи `mainWalPath`.
+ * @returns {Promise<number>} Количество операций, которые были отфильтрованы из `walToProcessPath` и добавлены к `mainWalPath`.
  * @throws {Error} Если произошла критическая ошибка.
  */
 async function finalizeWalAfterCheckpoint(mainWalPath, walToProcessPath, actualCheckpointTimestamp, walForceSync) {
-    let operationsMovedCount = 0;
+    let operationsKeptFromProcessedWalCount = 0;
     if (!(await pathExists(walToProcessPath))) {
-        console.log(`WalManager: Временный WAL "${walToProcessPath}" не найден для финализации (возможно, был пуст и не создавался или уже удален). Пропуск.`);
-        return operationsMovedCount;
+        console.log(`WalManager: Временный WAL "${path.basename(walToProcessPath)}" не найден для финализации. Пропуск.`);
+        return operationsKeptFromProcessedWalCount;
     }
 
+    // Уникальное имя для временного файла, в который будет собираться новый основной WAL
     const tempFinalWalPath = `${mainWalPath}.${Date.now()}.${Math.random().toString(36).substring(2,7)}.finalizing.tmp`;
-
+    
     try {
         const entriesFromProcessedWal = await readWal(walToProcessPath); 
+        // Отбираем записи из обработанного WAL, которые строго новее метки чекпоинта
+        const entriesToKeepInNewWal = entriesFromProcessedWal.filter(entry => entry.ts > actualCheckpointTimestamp);
+        operationsKeptFromProcessedWalCount = entriesToKeepInNewWal.length;
+
+        let currentMainWalLines = [];
+        if (await pathExists(mainWalPath)) {
+            const currentMainWalContent = await fs.readFile(mainWalPath, 'utf-8');
+            if (currentMainWalContent.trim() !== '') {
+                currentMainWalLines = currentMainWalContent.trim().split('\n');
+            }
+        }
         
-        // Фильтруем записи, которые должны остаться: те, что СТРОГО новее метки времени чекпоинта.
-        // Операции с ts РАВНЫМ actualCheckpointTimestamp считаются вошедшими в чекпоинт и не переносятся.
-        const entriesToKeep = entriesFromProcessedWal.filter(entry => entry.ts > actualCheckpointTimestamp);
+        const linesToKeepInNewWalAsJsonStrings = entriesToKeepInNewWal.map(entry => JSON.stringify(entry));
+        // Объединяем существующие строки в mainWalPath (которые могли появиться во время чекпоинта)
+        // с отфильтрованными строками из walToProcessPath.
+        const combinedLines = [...currentMainWalLines, ...linesToKeepInNewWalAsJsonStrings];
+        
+        const finalNewWalContent = combinedLines.length > 0 ? combinedLines.join('\n') + '\n' : '';
+        
+        // Записываем объединенное содержимое во временный файл
+        await fs.writeFile(tempFinalWalPath, finalNewWalContent, 'utf-8');
+        if (walForceSync && finalNewWalContent.length > 0) { 
+            let tempHandle;
+            try {
+                tempHandle = await fs.open(tempFinalWalPath, 'r+'); 
+                await tempHandle.sync();
+            } finally {
+                if (tempHandle) await tempHandle.close();
+            }
+        }
 
-        if (entriesToKeep.length > 0) {
-            console.log(`WalManager: Обнаружено ${entriesToKeep.length} операций в "${path.basename(walToProcessPath)}", которые строго новее чекпоинта (ts: ${actualCheckpointTimestamp}). Перенос в основной WAL "${path.basename(mainWalPath)}".`);
-            // Дописываем эти записи в КОНЕЦ существующего mainWalPath (который мог наполниться во время чекпоинта).
-            // Поэтому, мы не можем просто перезаписать mainWalPath. Мы должны дописать.
-            // Однако, если mainWalPath - это новый, только что созданный файл (после prepareWalForCheckpoint), то appendFile - это то, что нужно.
-            // Но если prepareWalForCheckpoint не переименовывал, а копировал, тогда mainWalPath мог наполниться.
-            // При текущей логике prepareWalForCheckpoint (rename старого, создание нового пустого), mainWalPath должен быть пуст,
-            // ИЛИ содержать записи, пришедшие во время чекпоинта.
-            // Значит, мы должны дописать entriesToKeep к содержимому mainWalPath.
-            
-            // Более безопасный способ: прочитать текущий mainWalPath, добавить entriesToKeep, записать во временный, переименовать.
-            let currentMainWalEntries = [];
-            if (await pathExists(mainWalPath)) {
-                currentMainWalEntries = await readWal(mainWalPath); // Читаем всё из текущего mainWalPath
-            }
-            
-            const combinedEntries = [...currentMainWalEntries, ...entriesToKeep];
-            
-            if (combinedEntries.length > 0) {
-                 const newWalContent = combinedEntries.map(entry => JSON.stringify(entry)).join('\n') + '\n';
-                 await fs.writeFile(tempFinalWalPath, newWalContent, 'utf-8');
-            } else {
-                await fs.writeFile(tempFinalWalPath, '', 'utf-8'); // Если в итоге пусто, пишем пустой
-            }
-            operationsMovedCount = entriesToKeep.length; // Сколько мы именно *добавили* из обработанного WAL
-
-        } else {
-            // Если из walToProcessPath нечего переносить, то mainWalPath остается как есть.
-            // Но для консистентности с путем через tempFinalWalPath, мы "перезапишем" его самим собой (или пустым, если он пуст)
-            // Это упрощает логику переименования ниже.
-            if (await pathExists(mainWalPath)) {
-                const currentMainWalContent = await fs.readFile(mainWalPath, 'utf-8');
-                await fs.writeFile(tempFinalWalPath, currentMainWalContent, 'utf-8');
-            } else {
-                await fs.writeFile(tempFinalWalPath, '', 'utf-8');
-            }
-             console.log(`WalManager: В "${path.basename(walToProcessPath)}" нет операций новее чекпоинта (ts: ${actualCheckpointTimestamp}). Основной WAL "${path.basename(mainWalPath)}" не изменен записями из старого WAL.`);
+        if (operationsKeptFromProcessedWalCount > 0) {
+            console.log(`WalManager: ${operationsKeptFromProcessedWalCount} операций из "${path.basename(walToProcessPath)}" (новее ${actualCheckpointTimestamp}) будут объединены с текущим основным WAL.`);
         }
 
         // Безопасно заменяем основной WAL-файл содержимым tempFinalWalPath
-        let attempts = 0;
-        const MAX_RENAME_ATTEMPTS = 5;
+        let attempts = 0; 
+        const MAX_RENAME_ATTEMPTS = 5; 
         const RENAME_DELAY_MS = 200;
         while (attempts < MAX_RENAME_ATTEMPTS) {
             try {
@@ -241,14 +226,16 @@ async function finalizeWalAfterCheckpoint(mainWalPath, walToProcessPath, actualC
             } catch (renameError) {
                 attempts++;
                 if ((renameError.code === 'EPERM' || renameError.code === 'EBUSY') && attempts < MAX_RENAME_ATTEMPTS) {
-                    console.warn(`WalManager: Попытка ${attempts}/${MAX_RENAME_ATTEMPTS} переименования основного WAL "${tempFinalWalPath}" -> "${mainWalPath}" не удалась (${renameError.code}). Повтор через ${RENAME_DELAY_MS} мс.`);
+                    console.warn(`WalManager: Попытка ${attempts}/${MAX_RENAME_ATTEMPTS} rename основного WAL "${tempFinalWalPath}" -> "${mainWalPath}" (${renameError.code}). Повтор ${RENAME_DELAY_MS} мс.`);
                     await delay(RENAME_DELAY_MS);
                 } else {
-                    console.error(`WalManager: Не удалось переименовать временный основной WAL "${tempFinalWalPath}" в "${mainWalPath}" после ${attempts} попыток. Ошибка: ${renameError.message}`);
-                    if (await pathExists(tempFinalWalPath)) { 
-                        try { await fs.unlink(tempFinalWalPath); } catch(e) { console.warn(`WalManager: Не удалось удалить ${tempFinalWalPath} после ошибки rename: ${e.message}`)}
+                    console.error(`WalManager: Не удалось rename временный основной WAL "${tempFinalWalPath}" в "${mainWalPath}" после ${attempts} попыток. ${renameError.message}`);
+                    // Пытаемся удалить временный файл перед тем, как бросить ошибку, чтобы не оставлять мусор
+                    if (await pathExists(tempFinalWalPath)) {
+                        try { await fs.unlink(tempFinalWalPath); } 
+                        catch(e) { console.warn(`WalManager: Не удалось удалить ${tempFinalWalPath} после ошибки rename: ${e.message}`)}
                     }
-                    throw renameError;
+                    throw renameError; // Перебрасываем ошибку переименования
                 }
             }
         }
@@ -258,21 +245,23 @@ async function finalizeWalAfterCheckpoint(mainWalPath, walToProcessPath, actualC
             await fs.unlink(walToProcessPath);
             console.log(`WalManager: Временный (обработанный) WAL "${path.basename(walToProcessPath)}" успешно удален.`);
         } catch (unlinkError) {
-            // Если файл не найден (например, был пуст и не создавался через writeFile в prepareWalForCheckpoint), это нормально
-            if (unlinkError.code !== 'ENOENT') {
+            if (unlinkError.code !== 'ENOENT') { // Игнорируем, если файл уже удален или не был создан (если был пуст)
                 console.error(`WalManager: Не удалось удалить обработанный временный WAL "${path.basename(walToProcessPath)}": ${unlinkError.message}`);
             }
         }
-        return operationsMovedCount; 
+        return operationsKeptFromProcessedWalCount; // Возвращаем количество операций, которые были ДОБАВЛЕНЫ из старого WAL
+
     } catch (error) {
-        const errorMessage = `WalManager: Критическая ошибка при финализации WAL после чекпоинта (обработка "${path.basename(walToProcessPath)}"): ${error.message}`;
+        const errorMessage = `WalManager: Критическая ошибка при финализации WAL (обработка "${path.basename(walToProcessPath)}"): ${error.message}`;
         console.error(errorMessage, error.stack);
-        if (await pathExists(tempFinalWalPath)) { 
-            try { await fs.unlink(tempFinalWalPath); } catch (e) { console.warn(`WalManager: Не удалось удалить ${tempFinalWalPath} после ошибки финализации: ${e.message}`)}
+        // Если создавался tempFinalWalPath, пытаемся его удалить
+        if (await pathExists(tempFinalWalPath)) {
+            try { await fs.unlink(tempFinalWalPath); } 
+            catch (e) { console.warn(`WalManager: Не удалось удалить ${tempFinalWalPath} после ошибки финализации: ${e.message}`)}
         }
-        // walToProcessPath лучше не удалять автоматически, если здесь была ошибка, он может содержать важные данные.
+        // walToProcessPath содержит важные данные, которые не удалось обработать, НЕ удаляем его автоматически.
         console.warn(`WalManager: Временный WAL "${path.basename(walToProcessPath)}" СОХРАНЕН из-за ошибки финализации для ручного анализа.`);
-        throw new Error(errorMessage);
+        throw new Error(errorMessage); // Перебрасываем агрегированную ошибку
     }
 }
 
