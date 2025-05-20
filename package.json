@@ -1,10 +1,10 @@
 {
   "name": "wise-json-db",
-  "version": "3.1.0",
-  "description": "Легковесная, встраиваемая JSON база данных на чистом JavaScript для Node.js, с сегментацией и надежной записью.",
+  "version": "3.2.0",
+  "description": "Lightweight, embedded JSON database for Node.js with segment-based storage and reliable write-ahead logging.",
   "main": "wise-json/index.js",
   "scripts": {
-    "test": "node test/advanced-test-wise-json.js"
+    "test": "node test/extreme-test-wise-json.js"
   },
   "repository": {
     "type": "git",
@@ -18,7 +18,12 @@
     "embedded",
     "file-based",
     "nosql",
-    "simple"
+    "safe",
+    "checkpoint",
+    "wal",
+    "wise",
+    "segment",
+    "fsync"
   ],
   "author": "Xzdes <xzdes@yandex.ru>",
   "license": "MIT",
@@ -26,14 +31,16 @@
     "url": "https://github.com/Xzdes/WiseJSON/issues"
   },
   "homepage": "https://github.com/Xzdes/WiseJSON#readme",
-  "dependencies": {
-
-  },
+  "dependencies": {},
   "files": [
     "wise-json/",
-    "README.md"
+    "README.md",
+    "logo.png"
   ],
   "engines": {
     "node": ">=14.0.0"
+  },
+  "bin": {
+    "wise-json": "wise-json/cli/wise-json-cli.js"
   }
 }
