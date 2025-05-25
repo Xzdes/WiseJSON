@@ -1,7 +1,7 @@
 {
   "name": "wise-json-db",
   "version": "4.5.0",
-  "description": "Lightweight, embedded JSON database for Node.js with segment-based storage and reliable write-ahead logging.",
+  "description": "Blazing fast, crash-proof embedded JSON database for Node.js with batch operations, TTL, indexes, and segmented checkpointing.",
   "main": "wise-json/index.js",
   "scripts": {
     "test": "node test/extreme-test-wise-json.js"
