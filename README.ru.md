@@ -102,10 +102,10 @@ await users.insertMany(arr);
 
 Все тесты (easy, stress, extreme, segment, WAL recovery, TTL, batch, экспорт/импорт, crash recovery, мультиколлекции) **успешно пройдены**:
 
-- `node test/easy-test-wise-json.js`
-- `node test/stress-test-wise-json.js`
 - `node test/extreme-stress-wise-json.js`
+- `node test/extreme-test-wise-json.js`
 - `node test/segment-check-test.js`
+- `node test/stress-test-wise-json.js`
 
 Результаты:
 - **10 000 вставок:** ~2.5 сек

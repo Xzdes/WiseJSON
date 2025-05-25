@@ -105,10 +105,10 @@ await users.insertMany(arr);
 
 All tests (basic, stress, segment, WAL recovery, TTL, batch, export/import, recovery from crash, multi-collection) **passed**:
 
-- `node test/easy-test-wise-json.js`
-- `node test/stress-test-wise-json.js`
 - `node test/extreme-stress-wise-json.js`
+- `node test/extreme-test-wise-json.js`
 - `node test/segment-check-test.js`
+- `node test/stress-test-wise-json.js`
 
 Results:
 - **10,000 inserts**: ~2.5 seconds
