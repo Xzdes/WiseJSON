@@ -31,7 +31,9 @@
     "url": "https://github.com/Xzdes/WiseJSON/issues"
   },
   "homepage": "https://github.com/Xzdes/WiseJSON#readme",
-  "dependencies": {},
+  "dependencies": {
+    "uuid": "^11.1.0"
+  },
   "files": [
     "wise-json/",
     "README.md",

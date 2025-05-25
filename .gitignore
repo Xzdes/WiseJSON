@@ -38,9 +38,11 @@ build/
 # Optional npm cache directory
 .npm/
 
+
 # Local npm logs
 .npm/_logs
 
 # Temporary files
 tmp/
 temp/
+package-lock.json
