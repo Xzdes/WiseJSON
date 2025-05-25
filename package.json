@@ -1,6 +1,6 @@
 {
   "name": "wise-json-db",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "description": "Lightweight, embedded JSON database for Node.js with segment-based storage and reliable write-ahead logging.",
   "main": "wise-json/index.js",
   "scripts": {

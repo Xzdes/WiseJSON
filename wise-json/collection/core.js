@@ -1,14 +1,13 @@
 const path = require('path');
 const fs = require('fs/promises');
-
 const CollectionEventEmitter = require('./events.js');
 const createWalOps = require('./wal-ops.js');
 const IndexManager = require('./indexes.js');
 const createCheckpointController = require('./checkpoints.js');
-
 const { defaultIdGenerator, isNonEmptyString, isPlainObject } = require('./utils.js');
 const { initializeWal, readWal, getWalPath } = require('../wal-manager.js');
 const { loadLatestCheckpoint } = require('../checkpoint-manager.js');
+const { cleanupExpiredDocs, isAlive } = require('./ttl.js');
 
 class Collection {
     constructor(name, dbRootPath, options = {}) {
@@ -45,7 +44,7 @@ class Collection {
             _updateIndexesAfterInsert: doc => this._indexManager.afterInsert(doc),
             _updateIndexesAfterRemove: doc => this._indexManager.afterRemove(doc),
             _updateIndexesAfterUpdate: (oldDoc, newDoc) => this._indexManager.afterUpdate(oldDoc, newDoc),
-            _triggerCheckpointIfRequired: op => this._checkpoint.incrementWalOpsAndMaybeTrigger(op),
+            _triggerCheckpointIfRequired: () => {},
             options: this.options,
             walPath: this.walPath,
         });
@@ -53,7 +52,6 @@ class Collection {
         this.applyWalEntryToMemory = walOps.applyWalEntryToMemory;
         this._enqueueDataModification = walOps.enqueueDataModification;
 
-        // --- Добавляем счетчики статистики ---
         this._stats = { inserts: 0, updates: 0, removes: 0, clears: 0 };
 
         this.initPromise = this._initialize();
@@ -63,6 +61,7 @@ class Collection {
         await fs.mkdir(this.collectionDirPath, { recursive: true });
         await initializeWal(this.walPath, this.collectionDirPath);
 
+        // 1. Загружаем последний чекпоинт
         const loaded = await loadLatestCheckpoint(
             path.join(this.collectionDirPath, '_checkpoints'),
             this.name
@@ -78,12 +77,14 @@ class Collection {
             });
         }
 
-        this._indexManager.rebuildIndexesFromData(this.documents);
-
+        // 2. Проигрываем WAL — это ДОПОЛНЕНИЕ к чекпоинту
         const walEntries = await readWal(this.walPath, loaded.timestamp);
         for (const entry of walEntries) {
             this.applyWalEntryToMemory(entry, false);
         }
+
+        // 3. Пересобираем индексы только ПОСЛЕ применения WAL (ВАЖНО)
+        this._indexManager.rebuildIndexesFromData(this.documents);
 
         this._checkpoint.startCheckpointTimer();
     }
@@ -136,16 +137,26 @@ class Collection {
         });
     }
 
-    // --------- Новый метод пакетной вставки ----------
     async insertMany(docs) {
         if (!Array.isArray(docs)) throw new Error('insertMany: Argument must be an array');
-        const results = [];
-        for (const doc of docs) {
-            results.push(await this.insert(doc));
-        }
-        return results;
+        const now = new Date().toISOString();
+        const prepared = docs.map(doc => ({
+            ...doc,
+            _id: doc._id || this._idGenerator(),
+            createdAt: doc.createdAt || now,
+            updatedAt: doc.updatedAt || now,
+        }));
+
+        return this._enqueue(async () => {
+            await this._enqueueDataModification(
+                { op: 'BATCH_INSERT', docs: prepared },
+                'BATCH_INSERT',
+                (_, inserted) => inserted
+            );
+            this._stats.inserts += prepared.length;
+            return prepared;
+        });
     }
-    // ------------------------------------------------
 
     async update(id, updates) {
         if (!this.documents.has(id)) throw new Error(`update: документ с id "${id}" не найден.`);
@@ -194,25 +205,30 @@ class Collection {
     }
 
     async getById(id) {
-        return this.documents.get(id) || null;
+        const doc = this.documents.get(id);
+        return (doc && isAlive(doc)) ? doc : null;
     }
 
     async getAll() {
-        return Array.from(this.documents.values());
+        cleanupExpiredDocs(this.documents, this._indexManager);
+        return Array.from(this.documents.values()).filter(isAlive);
     }
 
     async count() {
-        return this.documents.size;
+        cleanupExpiredDocs(this.documents, this._indexManager);
+        return Array.from(this.documents.values()).filter(isAlive).length;
     }
 
     async find(queryFn) {
         if (typeof queryFn !== 'function') throw new Error('find: требуется функция-предикат');
-        return Array.from(this.documents.values()).filter(queryFn);
+        cleanupExpiredDocs(this.documents, this._indexManager);
+        return Array.from(this.documents.values()).filter(isAlive).filter(queryFn);
     }
 
     async findOne(queryFn) {
         if (typeof queryFn !== 'function') throw new Error('findOne: требуется функция-предикат');
-        return Array.from(this.documents.values()).find(queryFn) || null;
+        cleanupExpiredDocs(this.documents, this._indexManager);
+        return Array.from(this.documents.values()).filter(isAlive).find(queryFn) || null;
     }
 
     async createIndex(fieldName, options) {
@@ -229,13 +245,19 @@ class Collection {
     }
 
     async findOneByIndexedValue(fieldName, value) {
+        cleanupExpiredDocs(this.documents, this._indexManager);
         const id = this._indexManager.findOneIdByIndex(fieldName, value);
-        return id ? this.documents.get(id) || null : null;
+        const doc = id ? this.documents.get(id) || null : null;
+        return (doc && isAlive(doc)) ? doc : null;
     }
 
     async findByIndexedValue(fieldName, value) {
+        cleanupExpiredDocs(this.documents, this._indexManager);
         const ids = this._indexManager.findIdsByIndex(fieldName, value);
-        return Array.from(ids).map(id => this.documents.get(id)).filter(Boolean);
+        return Array.from(ids)
+            .map(id => this.documents.get(id))
+            .filter(Boolean)
+            .filter(isAlive);
     }
 
     on(eventName, listener) {
@@ -247,6 +269,7 @@ class Collection {
     }
 
     async flushToDisk() {
+        cleanupExpiredDocs(this.documents, this._indexManager);
         return this._checkpoint.saveCheckpoint();
     }
 
@@ -255,17 +278,16 @@ class Collection {
         await this.flushToDisk();
     }
 
-    // ------ Публичная статистика ------
     stats() {
+        cleanupExpiredDocs(this.documents, this._indexManager);
         return {
             inserts: this._stats.inserts,
             updates: this._stats.updates,
             removes: this._stats.removes,
             clears: this._stats.clears,
-            count: this.documents.size
+            count: Array.from(this.documents.values()).filter(isAlive).length
         };
     }
-    // ----------------------------------
 }
 
 module.exports = Collection;

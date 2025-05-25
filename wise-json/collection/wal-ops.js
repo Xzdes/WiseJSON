@@ -1,137 +1,123 @@
-// collection/wal-ops.js
-
-const { nowIso, deepCloneJson } = require('./utils.js');
-const { appendToWal } = require('../wal-manager.js');
+const fs = require('fs/promises');
+const path = require('path');
+const { isPlainObject } = require('./utils.js');
+const { isAlive } = require('./ttl.js');
 
 /**
- * Создаёт функции для работы с WAL внутри Collection.
- * @param {object} context
- * @param {Map<string, object>} context.documents
- * @param {Function} context._performCheckpoint
- * @param {CollectionEventEmitter} context._emitter
- * @param {Function} context._updateIndexesAfterInsert
- * @param {Function} context._updateIndexesAfterRemove
- * @param {Function} context._updateIndexesAfterUpdate
- * @param {Function} context._triggerCheckpointIfRequired
- * @param {object} context.options
- * @param {string} context.walPath
- * @returns {object}
+ * Генерирует строку для WAL (одна операция).
  */
-function createWalOps(context) {
-    const {
-        documents,
-        _performCheckpoint,
-        _emitter,
-        _updateIndexesAfterInsert,
-        _updateIndexesAfterRemove,
-        _updateIndexesAfterUpdate,
-        _triggerCheckpointIfRequired,
-        options,
-        walPath,
-    } = context;
+function walEntryToString(entry) {
+    return JSON.stringify(entry) + '\n';
+}
+
+/**
+ * Читает все строки WAL и возвращает массив объектов.
+ * @param {string} walFile
+ * @returns {Promise<Object[]>}
+ */
+async function readWalEntries(walFile, sinceTimestamp = null) {
+    let raw;
+    try {
+        raw = await fs.readFile(walFile, 'utf8');
+    } catch (e) {
+        if (e.code === 'ENOENT') return [];
+        throw e;
+    }
+    const lines = raw.trim().split('\n');
+    const result = [];
+    for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+            const entry = JSON.parse(line);
+            result.push(entry);
+        } catch (e) {}
+    }
+    return result;
+}
+
+function createWalOps({ documents, _performCheckpoint, _emitter, _updateIndexesAfterInsert, _updateIndexesAfterRemove, _updateIndexesAfterUpdate, _triggerCheckpointIfRequired, options, walPath }) {
 
     /**
-     * Применяет одну запись WAL к памяти.
-     * @param {object} entry
-     * @param {boolean} isLive
-     * @returns {object|null}
+     * Применяет одну запись WAL к памяти (и к индексам)
      */
-    function applyWalEntryToMemory(entry, isLive = true) {
-        if (!entry || typeof entry.op !== 'string') return null;
-
-        const ts = entry.ts || (isLive ? nowIso() : null);
-        let result = null;
-
-        switch (entry.op) {
-            case 'INSERT':
-                if (entry.doc && typeof entry.doc._id === 'string') {
-                    const doc = { ...entry.doc };
-                    doc.createdAt = doc.createdAt || ts;
-                    doc.updatedAt = doc.updatedAt || ts;
+    function applyWalEntryToMemory(entry, emit = true) {
+        if (entry.op === 'INSERT') {
+            const doc = entry.doc;
+            if (doc && isAlive(doc)) {
+                documents.set(doc._id, doc);
+                _updateIndexesAfterInsert && _updateIndexesAfterInsert(doc);
+                if (emit) _emitter.emit('insert', doc);
+            }
+        } else if (entry.op === 'BATCH_INSERT') {
+            const docs = Array.isArray(entry.docs) ? entry.docs : [];
+            for (const doc of docs) {
+                if (doc && isAlive(doc)) {
                     documents.set(doc._id, doc);
-                    result = doc;
+                    _updateIndexesAfterInsert && _updateIndexesAfterInsert(doc);
+                    if (emit) _emitter.emit('insert', doc);
                 }
-                break;
-
-            case 'UPDATE':
-                if (typeof entry.id === 'string' && entry.data && typeof entry.data === 'object') {
-                    const existing = documents.get(entry.id);
-                    if (existing) {
-                        const updated = { ...existing, ...entry.data, updatedAt: entry.data.updatedAt || ts };
-                        documents.set(entry.id, updated);
-                        result = updated;
-                    }
-                }
-                break;
-
-            case 'REMOVE':
-                if (typeof entry.id === 'string') {
-                    result = documents.get(entry.id) || null;
-                    if (result) documents.delete(entry.id);
-                }
-                break;
-
-            case 'CLEAR':
-                documents.clear();
-                break;
-
-            default:
-                console.warn(`[Collection] Неизвестная операция в WAL: '${entry.op}'`);
+            }
+        } else if (entry.op === 'UPDATE') {
+            const id = entry.id;
+            const prev = documents.get(id);
+            if (prev && isAlive(prev)) {
+                const updated = { ...prev, ...entry.data };
+                documents.set(id, updated);
+                _updateIndexesAfterUpdate && _updateIndexesAfterUpdate(prev, updated);
+                if (emit) _emitter.emit('update', updated, prev);
+            }
+        } else if (entry.op === 'REMOVE') {
+            const id = entry.id;
+            const prev = documents.get(id);
+            if (prev) {
+                documents.delete(id);
+                _updateIndexesAfterRemove && _updateIndexesAfterRemove(prev);
+                if (emit) _emitter.emit('remove', prev);
+            }
+        } else if (entry.op === 'CLEAR') {
+            for (const [id, doc] of documents.entries()) {
+                documents.delete(id);
+                _updateIndexesAfterRemove && _updateIndexesAfterRemove(doc);
+            }
+            if (emit) _emitter.emit('clear');
         }
-
-        return result;
     }
 
     /**
-     * Выполняет WAL-запись + применение к памяти + событие.
-     * @param {object} walEntry
-     * @param {string} opType
-     * @param {Function} getResultFn
-     * @param {object} [eventInfo]
-     * @returns {Promise<any>}
+     * Основная функция для записи операции в WAL, выполнения её в памяти, чекпоинта и т.д.
+     * opType: INSERT, BATCH_INSERT, UPDATE, REMOVE, CLEAR
      */
-    async function enqueueDataModification(walEntry, opType, getResultFn, eventInfo = {}) {
-        const ts = nowIso();
-        const finalEntry = { ...walEntry, ts };
+    async function enqueueDataModification(entry, opType, getResult, extra = {}) {
+        // Гарантируем, что папка для WAL существует!
+        await fs.mkdir(path.dirname(walPath), { recursive: true });
 
-        const preImage = (eventInfo.id && documents.has(eventInfo.id))
-            ? deepCloneJson(documents.get(eventInfo.id))
-            : null;
+        // Записываем в WAL
+        await fs.appendFile(walPath, walEntryToString(entry), 'utf8');
 
-        await appendToWal(walPath, finalEntry, options.walForceSync);
-        const inMem = applyWalEntryToMemory(finalEntry, true);
-        const result = getResultFn(preImage, inMem);
-
-        try {
-            if (opType === 'INSERT') _updateIndexesAfterInsert(inMem);
-            if (opType === 'UPDATE') _updateIndexesAfterUpdate(preImage, inMem);
-            if (opType === 'REMOVE') _updateIndexesAfterRemove(preImage);
-            if (opType === 'CLEAR') {
-                // Очистить все индексы — делается в вызывающем коде
-            }
-        } catch (indexErr) {
-            console.error(`[Collection] Ошибка обновления индексов после ${opType}: ${indexErr.message}`);
+        // Применяем к памяти и индексам
+        applyWalEntryToMemory(entry, true);
+        if (typeof _triggerCheckpointIfRequired === 'function') {
+            _triggerCheckpointIfRequired(entry);
         }
 
-        if (_emitter) {
-            try {
-                const eventName = `after${opType.charAt(0).toUpperCase() + opType.slice(1).toLowerCase()}`;
-                if (opType === 'INSERT') _emitter.emit(eventName, result);
-                if (opType === 'UPDATE') _emitter.emit(eventName, result, preImage);
-                if (opType === 'REMOVE') _emitter.emit(eventName, eventInfo.id, preImage);
-                if (opType === 'CLEAR') _emitter.emit(eventName);
-            } catch (e) {
-                console.error(`[Collection] Ошибка в событии '${opType}': ${e.message}`);
-            }
+        // Результат для пользователя (по callback, чтобы можно было что угодно вернуть)
+        let prev = null, next = null;
+        if (opType === 'INSERT') {
+            next = entry.doc;
+        } else if (opType === 'BATCH_INSERT') {
+            next = entry.docs;
+        } else if (opType === 'UPDATE') {
+            prev = documents.get(entry.id);
+            next = { ...prev, ...entry.data };
+        } else if (opType === 'REMOVE') {
+            prev = documents.get(entry.id);
         }
-
-        _triggerCheckpointIfRequired(opType);
-        return result;
+        return getResult ? getResult(prev, next) : undefined;
     }
 
     return {
         applyWalEntryToMemory,
-        enqueueDataModification,
+        enqueueDataModification
     };
 }
 
