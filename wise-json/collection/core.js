@@ -1,5 +1,3 @@
-// collection/core.js
-
 const path = require('path');
 const fs = require('fs/promises');
 
@@ -54,6 +52,9 @@ class Collection {
 
         this.applyWalEntryToMemory = walOps.applyWalEntryToMemory;
         this._enqueueDataModification = walOps.enqueueDataModification;
+
+        // --- Добавляем счетчики статистики ---
+        this._stats = { inserts: 0, updates: 0, removes: 0, clears: 0 };
 
         this.initPromise = this._initialize();
     }
@@ -114,7 +115,7 @@ class Collection {
     async insert(doc) {
         if (!isPlainObject(doc)) throw new Error('insert: аргумент должен быть объектом.');
 
-        return this._enqueue(() => {
+        return this._enqueue(async () => {
             const _id = doc._id || this._idGenerator();
             const now = new Date().toISOString();
             const finalDoc = {
@@ -124,54 +125,72 @@ class Collection {
                 updatedAt: doc.updatedAt || now,
             };
 
-            return this._enqueueDataModification(
+            const result = await this._enqueueDataModification(
                 { op: 'INSERT', doc: finalDoc },
                 'INSERT',
                 (_, inserted) => inserted
             );
+
+            this._stats.inserts++;
+            return result;
         });
     }
+
+    // --------- Новый метод пакетной вставки ----------
+    async insertMany(docs) {
+        if (!Array.isArray(docs)) throw new Error('insertMany: Argument must be an array');
+        const results = [];
+        for (const doc of docs) {
+            results.push(await this.insert(doc));
+        }
+        return results;
+    }
+    // ------------------------------------------------
 
     async update(id, updates) {
         if (!this.documents.has(id)) throw new Error(`update: документ с id "${id}" не найден.`);
         if (!isPlainObject(updates)) throw new Error('update: обновления должны быть объектом.');
 
-        return this._enqueue(() => {
+        return this._enqueue(async () => {
             const now = new Date().toISOString();
-            return this._enqueueDataModification(
+            const result = await this._enqueueDataModification(
                 { op: 'UPDATE', id, data: { ...updates, updatedAt: now } },
                 'UPDATE',
                 (prev, next) => next,
                 { id }
             );
+            this._stats.updates++;
+            return result;
         });
     }
 
     async remove(id) {
         if (!this.documents.has(id)) return false;
 
-        return this._enqueue(() =>
-            this._enqueueDataModification(
+        return this._enqueue(async () => {
+            const result = await this._enqueueDataModification(
                 { op: 'REMOVE', id },
                 'REMOVE',
                 () => true,
                 { id }
-            )
-        );
+            );
+            this._stats.removes++;
+            return result;
+        });
     }
 
     async clear() {
-        return this._enqueue(() =>
-            this._enqueueDataModification(
+        return this._enqueue(async () => {
+            const result = await this._enqueueDataModification(
                 { op: 'CLEAR' },
                 'CLEAR',
                 () => true
-            ).then(() => {
-                this.documents.clear();
-                this._indexManager.clearAllData();
-                return true;
-            })
-        );
+            );
+            this.documents.clear();
+            this._indexManager.clearAllData();
+            this._stats.clears++;
+            return result;
+        });
     }
 
     async getById(id) {
@@ -235,6 +254,18 @@ class Collection {
         this._checkpoint.stopCheckpointTimer();
         await this.flushToDisk();
     }
+
+    // ------ Публичная статистика ------
+    stats() {
+        return {
+            inserts: this._stats.inserts,
+            updates: this._stats.updates,
+            removes: this._stats.removes,
+            clears: this._stats.clears,
+            count: this.documents.size
+        };
+    }
+    // ----------------------------------
 }
 
 module.exports = Collection;
