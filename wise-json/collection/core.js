@@ -233,6 +233,23 @@ class Collection {
         });
     }
 
+        /**
+     * Массовое обновление: обновляет все документы, удовлетворяющие queryFn.
+     * @param {Function} queryFn - функция-фильтр (doc) => boolean
+     * @param {Object} updates - объект с полями для обновления
+     * @returns {number} Количество обновлённых документов
+     */
+    async updateMany(queryFn, updates) {
+        let count = 0;
+        for (const [id, doc] of this.documents.entries()) {
+            if (typeof queryFn === 'function' ? queryFn(doc) : false) {
+                await this.update(id, updates);
+                count++;
+            }
+        }
+        return count;
+    }
+
     async remove(id) {
         if (!this.documents.has(id)) return false;
 
