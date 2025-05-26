@@ -29,6 +29,7 @@ async function initializeWal(walPath, collectionDirPath) {
 /**
  * Чтение WAL-файла, возвращает массив операций начиная с указанного timestamp (если есть).
  * Поддержка batch (BATCH_INSERT).
+ * Если sinceTimestamp не задан — возвращает все.
  */
 async function readWal(walPath, sinceTimestamp = null) {
     let raw;
@@ -44,8 +45,15 @@ async function readWal(walPath, sinceTimestamp = null) {
         if (!line.trim()) continue;
         try {
             const entry = JSON.parse(line);
-            // Если нужен фильтр по времени — добавь здесь, если entry.timestamp > sinceTimestamp
-            result.push(entry);
+            // Реализация фильтрации по времени:
+            if (sinceTimestamp && entry.timestamp) {
+                if (entry.timestamp > sinceTimestamp) {
+                    result.push(entry);
+                }
+            } else if (!sinceTimestamp) {
+                result.push(entry);
+            }
+            // Если нет timestamp — опционально можно всегда добавлять, если sinceTimestamp не указан
         } catch (e) {}
     }
     return result;

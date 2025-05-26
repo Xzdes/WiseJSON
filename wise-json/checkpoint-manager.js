@@ -34,14 +34,33 @@ async function loadLatestCheckpoint(checkpointsDir, collectionName) {
     const dataFile = dataFiles[dataFiles.length - 1];
 
     let meta, docsArr;
+
+    // META
     try {
         meta = JSON.parse(await fs.readFile(path.join(checkpointsDir, metaFile), 'utf8'));
     } catch (e) {
+        // Если файл есть, но не читается (битый) — предупреждение!
+        const fullPath = path.join(checkpointsDir, metaFile);
+        try {
+            await fs.access(fullPath);
+            console.warn(`[Checkpoint] ⚠ Ошибка чтения мета-чекпоинта (битый файл): ${fullPath}`, e);
+        } catch {
+            // Если файла нет — тишина
+        }
         meta = { indexesMeta: [], timestamp: null };
     }
+
+    // DATA
     try {
         docsArr = JSON.parse(await fs.readFile(path.join(checkpointsDir, dataFile), 'utf8'));
     } catch (e) {
+        const fullPath = path.join(checkpointsDir, dataFile);
+        try {
+            await fs.access(fullPath);
+            console.warn(`[Checkpoint] ⚠ Ошибка чтения data-чекпоинта (битый файл): ${fullPath}`, e);
+        } catch {
+            // Если файла нет — тишина
+        }
         docsArr = [];
     }
 
