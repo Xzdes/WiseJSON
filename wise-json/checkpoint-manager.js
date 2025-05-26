@@ -43,7 +43,7 @@ async function loadLatestCheckpoint(checkpointsDir, collectionName) {
         const fullPath = path.join(checkpointsDir, metaFile);
         try {
             await fs.access(fullPath);
-            console.warn(`[Checkpoint] ⚠ Ошибка чтения мета-чекпоинта (битый файл): ${fullPath}`, e);
+            console.warn(`[Checkpoint] ⚠ Ошибка чтения мета-чекпоинта (битый файл): ${fullPath}\n${e.stack || e.message}`);
         } catch {
             // Если файла нет — тишина
         }
@@ -57,7 +57,7 @@ async function loadLatestCheckpoint(checkpointsDir, collectionName) {
         const fullPath = path.join(checkpointsDir, dataFile);
         try {
             await fs.access(fullPath);
-            console.warn(`[Checkpoint] ⚠ Ошибка чтения data-чекпоинта (битый файл): ${fullPath}`, e);
+            console.warn(`[Checkpoint] ⚠ Ошибка чтения data-чекпоинта (битый файл): ${fullPath}\n${e.stack || e.message}`);
         } catch {
             // Если файла нет — тишина
         }
@@ -74,6 +74,13 @@ async function loadLatestCheckpoint(checkpointsDir, collectionName) {
 
     // Чистим expired документы (TTL)
     cleanupExpiredDocs(documents);
+
+    // Явное логгирование для дебага
+    if (metaFile && dataFile) {
+        console.log(`[Checkpoint] Загружен checkpoint: meta: ${metaFile}, data: ${dataFile} (docs: ${documents.size})`);
+    } else {
+        console.warn(`[Checkpoint] Checkpoint files не найдены для коллекции: ${collectionName}`);
+    }
 
     return {
         documents,
@@ -93,7 +100,9 @@ async function cleanupOldCheckpoints(checkpointsDir, collectionName, keep = 5) {
         for (const f of toRemove) {
             try {
                 await fs.unlink(path.join(checkpointsDir, f));
-            } catch (e) {}
+            } catch (e) {
+                console.warn(`[Checkpoint] Не удалось удалить meta checkpoint: ${f} — ${e.stack || e.message}`);
+            }
         }
     }
     if (dataFiles.length > keep) {
@@ -101,7 +110,9 @@ async function cleanupOldCheckpoints(checkpointsDir, collectionName, keep = 5) {
         for (const f of toRemove) {
             try {
                 await fs.unlink(path.join(checkpointsDir, f));
-            } catch (e) {}
+            } catch (e) {
+                console.warn(`[Checkpoint] Не удалось удалить data checkpoint: ${f} — ${e.stack || e.message}`);
+            }
         }
     }
 }

@@ -1,4 +1,5 @@
 const { v4: uuidv4 } = require('uuid');
+const path = require('path');
 
 /**
  * Генератор уникальных идентификаторов по умолчанию.
@@ -75,6 +76,38 @@ function collectDocsFromWalBatch(walEntries) {
     return docs;
 }
 
+/**
+ * Делает путь абсолютным (если не абсолютный).
+ * @param {string} p
+ * @returns {string}
+ */
+function makeAbsolutePath(p) {
+    if (!p) return path.resolve(process.cwd());
+    return path.isAbsolute(p) ? p : path.resolve(process.cwd(), p);
+}
+
+/**
+ * Валидатор options для коллекции/базы.
+ * @param {object} options
+ * @returns {object}
+ */
+function validateOptions(options) {
+    const valid = isPlainObject(options) ? { ...options } : {};
+    // ttlCleanupIntervalMs — только число > 0
+    if (valid.ttlCleanupIntervalMs !== undefined) {
+        if (
+            typeof valid.ttlCleanupIntervalMs !== 'number' ||
+            isNaN(valid.ttlCleanupIntervalMs) ||
+            valid.ttlCleanupIntervalMs <= 0
+        ) {
+            console.warn('[WiseJSON] options.ttlCleanupIntervalMs должно быть положительным числом, использую 60000');
+            valid.ttlCleanupIntervalMs = 60000;
+        }
+    }
+    // Добавлять другие опции по мере необходимости!
+    return valid;
+}
+
 module.exports = {
     defaultIdGenerator,
     isNonEmptyString,
@@ -82,5 +115,7 @@ module.exports = {
     isArrayOfObjects,
     nowIsoString,
     docsArrayToMap,
-    collectDocsFromWalBatch
+    collectDocsFromWalBatch,
+    makeAbsolutePath,
+    validateOptions
 };

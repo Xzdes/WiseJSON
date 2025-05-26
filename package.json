@@ -41,5 +41,8 @@
   },
   "bin": {
     "wise-json": "wise-json/cli/wise-json-cli.js"
+  },
+  "dependencies": {
+    "uuid": "^11.1.0"
   }
 }
