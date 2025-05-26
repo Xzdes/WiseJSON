@@ -1,6 +1,6 @@
 
 <div align="center">
-  <img src="logo.png" width="100" alt="WiseJSON Logo"/>
+  <img src="logo.png" width="120" alt="WiseJSON Logo"/>
   <h1>WiseJSON — Embedded JSON Database for Node.js</h1>
   <a href="https://www.npmjs.com/package/wise-json-db"><img src="https://img.shields.io/npm/v/wise-json-db.svg?style=flat-square" /></a>
   <a href="https://github.com/Xzdes/WiseJSON"><img src="https://img.shields.io/github/stars/Xzdes/WiseJSON?style=flat-square" /></a>
@@ -58,42 +58,150 @@ console.log(found);
 
 ---
 
-## 📘 Full API Example
+## 📖 Usage Examples (Every Core Function)
 
-### Insert Many
+### Insert one document
+
+```js
+await users.insert({ name: 'John', age: 32 });
+```
+
+### Batch insert
 
 ```js
 await users.insertMany([
-  { name: 'Bob', email: 'bob@example.com' },
-  { name: 'Charlie', email: 'charlie@example.com' }
+  { name: 'Anna', age: 25 },
+  { name: 'Paul', age: 41 }
 ]);
 ```
 
-### Indexes
+### Find documents
+
+```js
+// Find all users older than 30
+const found = await users.find(doc => doc.age > 30);
+console.log(found);
+```
+
+### Find by index
 
 ```js
 await users.createIndex('email', { unique: true });
-const found = await users.findOneByIndexedValue('email', 'bob@example.com');
+const byEmail = await users.findByIndexedValue('email', 'john@example.com');
+console.log(byEmail);
 ```
 
-### TTL / Expire
+### Update document
+
+```js
+// By _id
+await users.update('u123', { age: 40 });
+```
+
+### Batch update — updateMany
+
+```js
+const now = Date.now();
+const numUpdated = await users.updateMany(doc => doc.active, { lastSeen: now });
+console.log('Updated:', numUpdated);
+```
+
+### Delete document
+
+```js
+await users.delete('u123');
+```
+
+### Batch delete — deleteMany
+
+```js
+const numDeleted = await users.deleteMany(doc => doc.age < 20);
+console.log('Deleted:', numDeleted);
+```
+
+### Count documents
+
+```js
+const count = await users.count();
+console.log('Total documents:', count);
+```
+
+### Get all documents
+
+```js
+const all = await users.getAll();
+console.log(all);
+```
+
+### Create/drop indexes
+
+```js
+await users.createIndex('age');
+await users.dropIndex('age');
+```
+
+### TTL (time-to-live)
 
 ```js
 await users.insert({
-  name: 'Eve',
-  email: 'eve@example.com',
-  expireAt: Date.now() + 1000 * 60 // expires in 1 min
+  name: 'Temporary',
+  expireAt: Date.now() + 10_000 // will disappear after 10 seconds
 });
 ```
 
-### Export / Import
+### Clear collection
 
 ```js
-const data = await users.getAll();
-require('fs').writeFileSync('export.json', JSON.stringify(data, null, 2));
+await users.clear();
+```
 
-const arr = JSON.parse(require('fs').readFileSync('export.json', 'utf8'));
-await users.insertMany(arr);
+### Transactions
+
+```js
+const txn = db.beginTransaction();
+await txn.collection('users').insert({ name: 'Alex' });
+await txn.collection('logs').insert({ action: 'User added' });
+await txn.commit(); // All changes are applied together or not at all
+```
+
+### Batch operations inside transaction
+
+```js
+const txn = db.beginTransaction();
+await txn.collection('users').insertMany([
+  { name: 'Batch1' }, { name: 'Batch2' }
+]);
+await txn.collection('users').updateMany(doc => !doc.active, { active: true });
+await txn.commit();
+```
+
+### Export data
+
+```js
+const all = await users.getAll();
+const fs = require('fs');
+fs.writeFileSync('backup.json', JSON.stringify(all, null, 2));
+```
+
+### Import data
+
+```js
+const fs = require('fs');
+const data = JSON.parse(fs.readFileSync('backup.json', 'utf8'));
+await users.insertMany(data);
+```
+
+### Recovery after crash
+
+```js
+const db = new WiseJSON('./my-db-data');
+const users = await db.collection('users'); // Collection auto-loads checkpoint + WAL
+```
+
+### Properly close database and save
+
+```js
+await db.close(); // Saves all collections and checkpoint
 ```
 
 ---

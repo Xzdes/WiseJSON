@@ -1,6 +1,6 @@
 
 <div align="center">
-  <img src="logo.png" width="100" alt="WiseJSON Logo"/>
+  <img src="logo.png" width="120" alt="WiseJSON Logo"/>
   <h1>WiseJSON — Быстрая JSON-база данных для Node.js</h1>
   <a href="https://www.npmjs.com/package/wise-json-db"><img src="https://img.shields.io/npm/v/wise-json-db.svg?style=flat-square" /></a>
   <a href="https://github.com/Xzdes/WiseJSON"><img src="https://img.shields.io/github/stars/Xzdes/WiseJSON?style=flat-square" /></a>
@@ -58,43 +58,160 @@ console.log(found);
 
 ---
 
-## 📘 Пример использования API
+## 📖 Примеры для ВСЕХ функций
+
+### Вставка одного документа
+
+```js
+await users.insert({ name: 'Иван', age: 32 });
+```
 
 ### Массовая вставка
 
 ```js
 await users.insertMany([
-  { name: 'Боб', email: 'bob@example.com' },
-  { name: 'Чарли', email: 'charlie@example.com' }
+  { name: 'Аня', age: 25 },
+  { name: 'Павел', age: 41 }
 ]);
 ```
 
-### Индексы
+### Поиск документов
+
+```js
+// Найти всех старше 30 лет
+const found = await users.find(doc => doc.age > 30);
+console.log(found);
+```
+
+### Получить один документ по индексу
 
 ```js
 await users.createIndex('email', { unique: true });
-const found = await users.findOneByIndexedValue('email', 'bob@example.com');
+const byEmail = await users.findByIndexedValue('email', 'ivan@example.com');
+console.log(byEmail);
 ```
 
-### TTL / Удаление
+### Обновление документа
+
+```js
+// По _id
+await users.update('u123', { age: 40 });
+```
+
+### Массовое обновление — updateMany
+
+```js
+const now = Date.now();
+const numUpdated = await users.updateMany(doc => doc.active, { lastSeen: now });
+console.log('Обновлено:', numUpdated);
+```
+
+### Удаление документа
+
+```js
+await users.delete('u123');
+```
+
+### Массовое удаление — deleteMany
+
+```js
+const numDeleted = await users.deleteMany(doc => doc.age < 20);
+console.log('Удалено:', numDeleted);
+```
+
+### Проверка количества
+
+```js
+const count = await users.count();
+console.log('Документов в коллекции:', count);
+```
+
+### Получить все документы
+
+```js
+const all = await users.getAll();
+console.log(all);
+```
+
+### Создание/удаление индексов
+
+```js
+await users.createIndex('age');
+await users.dropIndex('age');
+```
+
+### Работа с TTL (время жизни)
 
 ```js
 await users.insert({
-  name: 'Ева',
-  email: 'eve@example.com',
-  expireAt: Date.now() + 1000 * 60 // удалится через 1 минуту
+  name: 'Временный',
+  expireAt: Date.now() + 10_000 // исчезнет через 10 секунд
 });
 ```
 
-### Экспорт / Импорт
+### Очистка коллекции
 
 ```js
-const data = await users.getAll();
-require('fs').writeFileSync('export.json', JSON.stringify(data, null, 2));
-
-const arr = JSON.parse(require('fs').readFileSync('export.json', 'utf8'));
-await users.insertMany(arr);
+await users.clear();
 ```
+
+### Транзакции
+
+```js
+const txn = db.beginTransaction();
+await txn.collection('users').insert({ name: 'Алексей' });
+await txn.collection('logs').insert({ action: 'Добавлен пользователь' });
+await txn.commit(); // Все изменения сохраняются вместе
+```
+
+### Массовая вставка/обновление в транзакции
+
+```js
+const txn = db.beginTransaction();
+await txn.collection('users').insertMany([
+  { name: 'Batch1' }, { name: 'Batch2' }
+]);
+await txn.collection('users').updateMany(doc => !doc.active, { active: true });
+await txn.commit();
+```
+
+### Экспорт данных
+
+```js
+const all = await users.getAll();
+const fs = require('fs');
+fs.writeFileSync('backup.json', JSON.stringify(all, null, 2));
+```
+
+### Импорт данных
+
+```js
+const fs = require('fs');
+const data = JSON.parse(fs.readFileSync('backup.json', 'utf8'));
+await users.insertMany(data);
+```
+
+### Восстановление после сбоя (recover)
+
+```js
+const db = new WiseJSON('./my-db-data');
+const users = await db.collection('users'); // Коллекция сама загрузит checkpoint + WAL
+```
+
+### Завершение работы и сохранение
+
+```js
+await db.close(); // Сохраняет все коллекции и checkpoint
+```
+
+---
+
+## 🛡️ Особенности
+
+* Все операции — атомарны, с журналом WAL
+* Восстановление гарантировано даже после аварии
+* Индексы "на лету", TTL удаляет документы в фоне
+* Можно использовать как оффлайн-замену mongo/redis/sqlite для nodejs-проектов
 
 ---
 
