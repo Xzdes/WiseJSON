@@ -313,14 +313,21 @@ class Collection {
         return (doc && isAlive(doc)) ? doc : null;
     }
 
-    async findByIndexedValue(fieldName, value) {
-        cleanupExpiredDocs(this.documents, this._indexManager);
-        const ids = this._indexManager.findIdsByIndex(fieldName, value);
-        return Array.from(ids)
-            .map(id => this.documents.get(id))
-            .filter(Boolean)
-            .filter(isAlive);
+async findByIndexedValue(fieldName, value) {
+    cleanupExpiredDocs(this.documents, this._indexManager);
+    const idx = this._indexManager.indexes.get(fieldName);
+    if (!idx) return [];
+    if (idx.type === 'unique') {
+        const id = this._indexManager.findOneIdByIndex(fieldName, value);
+        const doc = id ? this.documents.get(id) : null;
+        return doc && isAlive(doc) ? [doc] : [];
     }
+    const ids = this._indexManager.findIdsByIndex(fieldName, value);
+    return Array.from(ids)
+        .map(id => this.documents.get(id))
+        .filter(Boolean)
+        .filter(isAlive);
+}
 
     on(eventName, listener) {
         this._emitter.on(eventName, listener);

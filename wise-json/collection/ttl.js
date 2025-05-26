@@ -1,41 +1,31 @@
 // wise-json/collection/ttl.js
 
 /**
- * Проверяет, жив ли документ (не истёк ли TTL).
- * @param {Object} doc
- * @returns {boolean}
+ * Проверяет, жив ли документ (учитывая expireAt или ttl).
  */
 function isAlive(doc) {
-    if (!doc) return false;
-    if (!doc.expireAt) return true;
-    let expireTime = typeof doc.expireAt === 'string' ? Date.parse(doc.expireAt) : doc.expireAt;
-    return Date.now() < expireTime;
+    if (!doc || typeof doc !== 'object') return false;
+    // Поддержка обоих вариантов поля TTL (expireAt или ttl)
+    const exp = doc.expireAt ?? doc.ttl;
+    if (!exp) return true;
+    const expireTime = typeof exp === 'string' ? Date.parse(exp) : exp;
+    return !expireTime || Date.now() < expireTime;
 }
+exports.isAlive = isAlive;
 
 /**
- * Очищает "протухшие" (expired) документы из коллекции.
- * @param {Map} documents - Map документов (id -> doc)
- * @param {Object} indexManager - IndexManager для обновления индексов при удалении
- * @returns {number} - сколько удалено
+ * Удаляет все expired-документы из коллекции и обновляет индексы.
+ * Возвращает количество удалённых.
  */
 function cleanupExpiredDocs(documents, indexManager) {
     let removed = 0;
     for (const [id, doc] of documents.entries()) {
-        if (doc && doc.expireAt) {
-            let expireTime = typeof doc.expireAt === 'string' ? Date.parse(doc.expireAt) : doc.expireAt;
-            if (Date.now() >= expireTime) {
-                documents.delete(id);
-                if (indexManager && typeof indexManager.afterRemove === 'function') {
-                    indexManager.afterRemove(doc);
-                }
-                removed++;
-            }
+        if (!isAlive(doc)) {
+            documents.delete(id);
+            if (indexManager) indexManager.afterRemove(doc);
+            removed++;
         }
     }
     return removed;
 }
-
-module.exports = {
-    isAlive,
-    cleanupExpiredDocs
-};
+exports.cleanupExpiredDocs = cleanupExpiredDocs;
