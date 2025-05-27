@@ -1,293 +1,238 @@
-
 <div align="center">
   <img src="logo.png" width="120" alt="WiseJSON Logo"/>
-  <h1>WiseJSON — Embedded JSON Database for Node.js</h1>
-  <a href="https://www.npmjs.com/package/wise-json-db"><img src="https://img.shields.io/npm/v/wise-json-db.svg?style=flat-square" /></a>
-  <a href="https://github.com/Xzdes/WiseJSON"><img src="https://img.shields.io/github/stars/Xzdes/WiseJSON?style=flat-square" /></a>
-  <br />
-  <b>Blazing Fast, Crash-Proof, and Easy-to-Use local JSON database for Node.js</b>
-</div>
+
+# WiseJSON
+
+![Node.js CI](https://img.shields.io/github/workflow/status/Xzdes/WiseJSON/Node.js%20CI/main)
+![npm](https://img.shields.io/npm/v/wise-json)
+![license](https://img.shields.io/github/license/Xzdes/WiseJSON)
+![Downloads](https://img.shields.io/npm/dm/wise-json)
+
+> **Lightweight, embedded JSON database for Node.js. Fast, transactional, safe.**
+>
+> _Русская версия ниже:_ [README.ru.md](./README.ru.md)
 
 ---
 
-📖 [Русская версия / Russian version](./README.ru.md)
+## Table of Contents
 
-
-# WiseJSON — Embedded JSON Database for Node.js
-
-WiseJSON is a blazing fast, crash-safe, easy-to-use embedded JSON database designed for Node.js applications. It’s ideal for local data storage, lightweight backends, logging, caching, or embedded systems.
-
----
-
-## 🚀 Features
-
-- **Crash-safe WAL + checkpointing** — ensures no data loss.
-- **True batch operations** — fast insertMany and updateMany support.
-- **TTL (document expiration)** — auto-delete expired documents.
-- **Segmented checkpointing** — optimal for large datasets.
-- **Fast indexes** — unique and standard indexes.
-- **Multi-collection support** — like MongoDB, each collection isolated.
-- **Event hooks** — `on('insert')`, `on('update')`, etc.
-- **Simple API** — human-friendly, Promise-based.
-- **Fully tested** — with stress and crash recovery scenarios.
-- **Pure Node.js** — no native dependencies.
-- **CLI included** — with multilingual support (EN/RU).
+- [About](#about)
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [API Usage](#api-usage)
+  - [Collection API](#collection-api)
+  - [Transactions](#transactions)
+- [CLI Usage](#cli-usage)
+- [Testing](#testing)
+- [Advanced](#advanced)
+- [Roadmap / Progress](#roadmap--progress)
+- [License](#license)
 
 ---
 
-## 📦 Installation
+## About
+
+**WiseJSON** is an easy-to-use, embedded (file-based, not server) NoSQL database for Node.js.  
+Ideal for local apps, CLI, scripts, and prototypes — and even small production backends.
+
+- **Works out of the box:** just `require` and go.
+- **No binary dependencies** (pure Node.js).
+- **Supports**: indexes, transactions, TTL, checkpointing, WAL, flexible CLI.
+
+---
+
+## Features
+
+- Fast **CRUD** for JSON documents
+- **Safe Write-Ahead Log (WAL)** and checkpointing for data integrity
+- **Indexes** for fast search
+- **TTL (Time-to-live):** auto-expire docs
+- **Transactions** (multi-collection, ACID-like)
+- **Graceful shutdown:** all data saved on exit/SIGINT/SIGTERM
+- **CLI**: powerful and safe, JSON and JS predicate queries, import/export
+- **All code is open & readable!**
+- **Full test runner** (all scripts auto-checked)
+
+---
+
+## Installation
 
 ```bash
-npm install wise-json-db uuid
+npm install wise-json
+```
+
+Or, for CLI only:
+
+```bash
+npm install -g wise-json
 ```
 
 ---
 
-## 🔥 Quick Start
+## Quick Start
+
+**Node.js:**
 
 ```js
-const WiseJSON = require('wise-json-db');
-const db = new WiseJSON('./my-db-folder', { checkpointIntervalMs: 500 });
-await db.init();
+const WiseJSON = require('wise-json');
+const db = new WiseJSON('./my-db');
 
+// Use a collection:
+(async () => {
+  const users = await db.collection('users');
+  await users.insert({ name: 'Alice', age: 23 });
+  const found = await users.find(doc => doc.age > 20);
+  console.log(found); // [ { name: 'Alice', age: 23, ... } ]
+})();
+```
+
+**CLI:**
+
+```bash
+wise-json insert users '{"name":"Bob","age":30}'
+wise-json find users '{"age":30}'
+```
+
+---
+
+## API Usage
+
+### Collection API
+
+All methods are `async`.
+
+| Method                                  | Description                                                   |
+| ---------------------------------------- | ------------------------------------------------------------- |
+| `insert(doc)`                           | Insert a single document                                      |
+| `insertMany(docs)`                      | Insert multiple documents (array)                             |
+| `update(id, updates)`                   | Update document by id                                         |
+| `updateMany(queryFn, updates)`          | Update all docs matching a predicate                          |
+| `remove(id)`                            | Remove document by id                                         |
+| `clear()`                               | Remove all documents                                          |
+| `getById(id)`                           | Get document by id                                            |
+| `getAll()`                              | Get all docs (alive)                                          |
+| `count()`                               | Count all alive docs                                          |
+| `find(queryFn)`                         | Find docs by predicate (function)                             |
+| `findOne(queryFn)`                      | Find one doc by predicate                                     |
+| `createIndex(fieldName, options)`        | Create an index on a field (`{unique: true/false}`)           |
+| `dropIndex(fieldName)`                   | Drop index by field name                                      |
+| `getIndexes()`                          | Get all index metadata                                        |
+| `findOneByIndexedValue(field, value)`    | Fast search for one doc by indexed field                      |
+| `findByIndexedValue(field, value)`       | Fast search for all docs with field=value (via index)         |
+| `flushToDisk()`                         | Force checkpoint/save to disk                                 |
+| `close()`                               | Stop timers, checkpoint, release resources                    |
+| `stats()`                               | Get operation statistics                                      |
+| `on(event, listener)`/`off(event, fn)`  | Subscribe/unsubscribe to collection events                    |
+
+#### Example
+
+```js
 const users = await db.collection('users');
-await users.insert({ name: 'Alice', email: 'alice@example.com' });
-const found = await users.findOneByIndexedValue('email', 'alice@example.com');
-console.log(found);
+await users.insert({ name: 'John', age: 30 });
+await users.createIndex('name', { unique: false });
+const johns = await users.findByIndexedValue('name', 'John');
+console.log(johns);
 ```
 
 ---
-
-## 📖 Usage Examples (Every Core Function)
-
-### Insert one document
-
-```js
-await users.insert({ name: 'John', age: 32 });
-```
-
-### Batch insert
-
-```js
-await users.insertMany([
-  { name: 'Anna', age: 25 },
-  { name: 'Paul', age: 41 }
-]);
-```
-
-### Find documents
-
-```js
-// Find all users older than 30
-const found = await users.find(doc => doc.age > 30);
-console.log(found);
-```
-
-### Find by index
-
-```js
-await users.createIndex('email', { unique: true });
-const byEmail = await users.findByIndexedValue('email', 'john@example.com');
-console.log(byEmail);
-```
-
-### Update document
-
-```js
-// By _id
-await users.update('u123', { age: 40 });
-```
-
-### Batch update — updateMany
-
-```js
-const now = Date.now();
-const numUpdated = await users.updateMany(doc => doc.active, { lastSeen: now });
-console.log('Updated:', numUpdated);
-```
-
-### Delete document
-
-```js
-await users.delete('u123');
-```
-
-### Batch delete — deleteMany
-
-```js
-const numDeleted = await users.deleteMany(doc => doc.age < 20);
-console.log('Deleted:', numDeleted);
-```
-
-### Count documents
-
-```js
-const count = await users.count();
-console.log('Total documents:', count);
-```
-
-### Get all documents
-
-```js
-const all = await users.getAll();
-console.log(all);
-```
-
-### Create/drop indexes
-
-```js
-await users.createIndex('age');
-await users.dropIndex('age');
-```
-
-### TTL (time-to-live)
-
-```js
-await users.insert({
-  name: 'Temporary',
-  expireAt: Date.now() + 10_000 // will disappear after 10 seconds
-});
-```
-
-### Clear collection
-
-```js
-await users.clear();
-```
 
 ### Transactions
 
-```js
-const txn = db.beginTransaction();
-await txn.collection('users').insert({ name: 'Alex' });
-await txn.collection('logs').insert({ action: 'User added' });
-await txn.commit(); // All changes are applied together or not at all
-```
-
-### Batch operations inside transaction
+You can perform multi-collection atomic transactions.
 
 ```js
 const txn = db.beginTransaction();
-await txn.collection('users').insertMany([
-  { name: 'Batch1' }, { name: 'Batch2' }
-]);
-await txn.collection('users').updateMany(doc => !doc.active, { active: true });
+await txn.collection('users').insert({ name: 'Bob' });
+await txn.collection('logs').insert({ msg: 'Bob added' });
 await txn.commit();
 ```
 
-### Export data
-
-```js
-const all = await users.getAll();
-const fs = require('fs');
-fs.writeFileSync('backup.json', JSON.stringify(all, null, 2));
-```
-
-### Import data
-
-```js
-const fs = require('fs');
-const data = JSON.parse(fs.readFileSync('backup.json', 'utf8'));
-await users.insertMany(data);
-```
-
-### Recovery after crash
-
-```js
-const db = new WiseJSON('./my-db-data');
-const users = await db.collection('users'); // Collection auto-loads checkpoint + WAL
-```
-
-### Properly close database and save
-
-```js
-await db.close(); // Saves all collections and checkpoint
-```
+- Transactions are all-or-nothing (atomic).
+- If an error happens before commit, all changes are rolled back.
 
 ---
 
-## 🛠 CLI Usage
+## CLI Usage
 
-Run from terminal:
+### Help
+
 ```bash
-wise-json list
-wise-json insert users '{"name": "CLI User"}'
-wise-json export users out.json
+wise-json help
 ```
 
-Environment variables:
-- `WISE_JSON_PATH` — sets DB directory path
-- `WISE_JSON_LANG` — `en` or `ru`
+### Commands
+
+- `list` — List all collections
+- `info <collection>` — Stats and indexes
+- `insert <collection> <json>` — Insert one doc
+- `insert-many <collection> <file.json> [--ttl <ms>]` — Batch insert from file (optionally with TTL)
+- `find <collection> [filter] [--unsafe-eval]` — Find docs (see below)
+- `get <collection> <id>` — Get doc by id
+- `remove <collection> <id>` — Remove doc by id
+- `clear <collection>` — Clear collection
+- `export <collection> <file.json>` — Export collection to file
+- `import <collection> <file.json>` — Import docs from file
+
+### Filtering
+
+You can filter in two ways:
+1. **JSON filter** (safe, default):
+
+    ```bash
+    wise-json find users '{"age":30}'
+    ```
+
+2. **JS predicate (eval)** — use `--unsafe-eval`:
+
+    ```bash
+    wise-json find users 'doc => doc.age > 18' --unsafe-eval
+    ```
+
+    > ⚠️ **Warning:** Only use eval with trusted code!  
+      This flag is required for security.
 
 ---
 
-## 🧪 Testing
+## Testing
 
-Run tests:
+Run **all test scripts** (requires Node.js):
+
 ```bash
-node test/extreme-stress-wise-json.js
-node test/segment-check-test.js
+node test/run-all-tests.js
+# or (if added to package.json scripts)
+npm test
 ```
 
-All stress and recovery tests **passed** under:
-- Batch: 5,000 inserts < 300ms
-- WAL recovery: always successful
-- TTL cleanup and indexing work properly
+---
+
+## Advanced
+
+- **TTL:** Documents with `expireAt` field (timestamp in ms) auto-expire.
+- **Graceful Shutdown:** Data is auto-saved on exit/signals.
+- **Strict WAL error handling:** see `wal-manager.js` for `strict` and `onError` options.
+- **Indexes:** Fast unique or non-unique search on any field.
+- **Checkpointing:** Data periodically checkpointed for fast recovery.
 
 ---
 
-## 🧱 Internals
+## Roadmap / Progress
 
-- **WAL log** — appends all operations
-- **Checkpoints** — periodic state snapshots
-- **Segmented saving** — prevents large files
-- **Queue system** — serializes all writes
-- **Memory Map** — active in-RAM dataset
-
----
-
-## 🧭 Roadmap
-
-- [ ] Background compaction for WAL
-- [ ] Schema validation
-- [ ] CLI autocomplete / REPL mode
-- [ ] Web UI Viewer (Electron/NW.js)
+- [x] Graceful shutdown (no double-handling)
+- [x] Strict/Callback WAL parsing
+- [x] Safe CLI: JSON filters or `--unsafe-eval`
+- [x] Automatic test runner for all scripts
+- [x] Full event system
+- [ ] Hot backup & restore
+- [ ] Replication / Remote sync (planned)
+- [ ] Web UI (planned)
 
 ---
 
-## 📎 Links
+## License
 
-- GitHub: https://github.com/Xzdes/WiseJSON
-- NPM: https://npmjs.com/package/wise-json-db
-
-License: MIT
+MIT
 
 ---
 
-## 🧩 Why WiseJSON?
-
-WiseJSON was built with performance, reliability, and developer experience in mind.
-
-- **Ultra-fast batch operations** — Insert up to 10,000+ documents within seconds. Batch inserts (~5,000) complete in under **300ms**.
-- **Crash-safe WAL + Checkpoints** — Combines Write-Ahead Log and periodic checkpoints to guarantee **no data loss**, even during crashes.
-- **TTL (Time-to-Live)** — Documents expire automatically using `expireAt`. Great for temporary cache and logs.
-- **Segmented checkpointing** — No size limits; collections with millions of documents are saved as **split segments**.
-- **Event Hooks** — Subscribe to `beforeInsert`, `afterUpdate`, `onClear`, etc., for custom logic or metrics.
-- **Multi-collection architecture** — Each collection has isolated documents, indexes, WAL, and checkpoint system.
-- **Indexing** — Speed up lookups via `createIndex` on fields. Supports both **standard** and **unique** indexes.
-- **Import/Export/Stats** — Export entire collection to JSON. Track insert/update/remove stats with `.stats()`.
-- **Simple API** — Use `await db.collection('name')` and start working. API is consistent, minimal, and beginner-friendly.
-- **Fully tested** — Over 4,000+ test scenarios across segmenting, TTL, crash recovery, and indexing.
-- **Pure Node.js** — No binaries, native modules, or OS-specific code. 100% JavaScript and cross-platform.
-
----
-
-## 🌟 Achievements
-
-- **Stress-tested**: 15,000 inserts (single + batch) in seconds.
-- **Batch insert**: 5,000 docs in under **300ms**.
-- **Extreme scenarios**: WAL replay, checkpoint recovery, TTL auto-deletion, batch ops, and index rebuilds all fully tested.
-- **No data loss**: Recovery after simulated crash is 100% reliable.
-- **Segmented checkpointing**: Handles thousands of docs with ease, avoids file size bottlenecks.
-- **Cross-platform**: Verified on Windows, Linux, and Node.js 18 & 20.
-- **Open source**: [GitHub/Xzdes/WiseJSON](https://github.com/Xzdes/WiseJSON), [NPM](https://www.npmjs.com/package/wise-json-db)
+**Русская версия:** [README.ru.md](./README.ru.md)

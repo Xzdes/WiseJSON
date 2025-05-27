@@ -62,8 +62,6 @@ class Collection {
 
         this.initPromise = this._initialize();
 
-        this._setupGracefulShutdown();
-
         this._lastCheckpointTimestamp = null;
 
         this._ttlCleanupIntervalMs = this.options.ttlCleanupIntervalMs || 60 * 1000;
@@ -233,7 +231,7 @@ class Collection {
         });
     }
 
-        /**
+    /**
      * Массовое обновление: обновляет все документы, удовлетворяющие queryFn.
      * @param {Function} queryFn - функция-фильтр (doc) => boolean
      * @param {Object} updates - объект с полями для обновления
@@ -330,21 +328,21 @@ class Collection {
         return (doc && isAlive(doc)) ? doc : null;
     }
 
-async findByIndexedValue(fieldName, value) {
-    cleanupExpiredDocs(this.documents, this._indexManager);
-    const idx = this._indexManager.indexes.get(fieldName);
-    if (!idx) return [];
-    if (idx.type === 'unique') {
-        const id = this._indexManager.findOneIdByIndex(fieldName, value);
-        const doc = id ? this.documents.get(id) : null;
-        return doc && isAlive(doc) ? [doc] : [];
+    async findByIndexedValue(fieldName, value) {
+        cleanupExpiredDocs(this.documents, this._indexManager);
+        const idx = this._indexManager.indexes.get(fieldName);
+        if (!idx) return [];
+        if (idx.type === 'unique') {
+            const id = this._indexManager.findOneIdByIndex(fieldName, value);
+            const doc = id ? this.documents.get(id) : null;
+            return doc && isAlive(doc) ? [doc] : [];
+        }
+        const ids = this._indexManager.findIdsByIndex(fieldName, value);
+        return Array.from(ids)
+            .map(id => this.documents.get(id))
+            .filter(Boolean)
+            .filter(isAlive);
     }
-    const ids = this._indexManager.findIdsByIndex(fieldName, value);
-    return Array.from(ids)
-        .map(id => this.documents.get(id))
-        .filter(Boolean)
-        .filter(isAlive);
-}
 
     on(eventName, listener) {
         this._emitter.on(eventName, listener);
@@ -357,14 +355,14 @@ async findByIndexedValue(fieldName, value) {
     async flushToDisk() {
         cleanupExpiredDocs(this.documents, this._indexManager);
         const checkpointResult = await this._checkpoint.saveCheckpoint();
+
+        // Теперь НЕ парсим имя файла — используем checkpointResult.meta.timestamp!
         let lastCheckpointTimestamp = null;
-        if (checkpointResult && checkpointResult.metaFile) {
-            const m = checkpointResult.metaFile.match(/checkpoint_meta_[^_]+_(.+)\.json/);
-            if (m && m[1]) {
-                lastCheckpointTimestamp = m[1].replace(/-/g, ':');
-            }
+        if (checkpointResult && checkpointResult.meta && checkpointResult.meta.timestamp) {
+            lastCheckpointTimestamp = checkpointResult.meta.timestamp;
         }
         this._lastCheckpointTimestamp = lastCheckpointTimestamp || new Date().toISOString();
+
         await compactWal(this.walPath, this._lastCheckpointTimestamp);
 
         console.log(`[WiseJSON] Saved checkpoint for collection: ${this.name}`);
@@ -387,22 +385,6 @@ async findByIndexedValue(fieldName, value) {
             clears: this._stats.clears,
             count: Array.from(this.documents.values()).filter(isAlive).length
         };
-    }
-
-    _setupGracefulShutdown() {
-        if (Collection._hasGracefulShutdown) return;
-        const signals = ['SIGINT', 'SIGTERM'];
-        signals.forEach(signal => {
-            process.on(signal, async () => {
-                try {
-                    console.log(`\n[WiseJSON] Получен сигнал ${signal}, сохраняем коллекцию "${this.name}"...`);
-                    await this.close();
-                } catch (e) {
-                    console.error(`[WiseJSON] Ошибка при автосохранении коллекции "${this.name}" при завершении:`, e);
-                }
-            });
-        });
-        Collection._hasGracefulShutdown = true;
     }
 
     // === Транзакционные методы ===

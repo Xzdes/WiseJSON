@@ -46,9 +46,10 @@ async function appendWalEntry(walPath, entry) {
  * Для транзакций: если блок не завершён (нет TXN_COMMIT), его операции не применять.
  * @param {string} walPath
  * @param {string|null} sinceTimestamp
+ * @param {object} [options] - { strict: boolean, onError: function }
  * @returns {Promise<Array<Object>>}
  */
-async function readWal(walPath, sinceTimestamp = null) {
+async function readWal(walPath, sinceTimestamp = null, options = {}) {
     let raw;
     try {
         raw = await fs.readFile(walPath, 'utf8');
@@ -78,7 +79,13 @@ async function readWal(walPath, sinceTimestamp = null) {
         try {
             entry = JSON.parse(line);
         } catch (e) {
-            console.warn(`[WAL] ⚠ Не удалось распарсить запись WAL: ${e.stack || e.message}`);
+            if (typeof options.onError === 'function') {
+                options.onError(e, line);
+            } else if (options.strict) {
+                throw new Error(`[WAL] Не удалось распарсить запись WAL: ${e.stack || e.message}`);
+            } else {
+                console.warn(`[WAL] ⚠ Не удалось распарсить запись WAL: ${e.stack || e.message}`);
+            }
             continue;
         }
 

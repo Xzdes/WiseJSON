@@ -50,8 +50,11 @@ class WiseJSON {
 
     _setupGracefulShutdown() {
         const signals = ['SIGINT', 'SIGTERM'];
+        let isShuttingDown = false;
         signals.forEach(signal => {
             process.on(signal, async () => {
+                if (isShuttingDown) return;
+                isShuttingDown = true;
                 try {
                     console.log(`\n[WiseJSON] Получен сигнал ${signal}, сохраняем все коллекции...`);
                     if (this && typeof this.close === 'function') {
@@ -60,8 +63,9 @@ class WiseJSON {
                     console.log('[WiseJSON] Всё сохранено. Завершение работы.');
                 } catch (e) {
                     console.error('[WiseJSON] Ошибка при автосохранении при завершении:', e);
+                } finally {
+                    process.exit(0);
                 }
-                process.exit(0);
             });
         });
     }

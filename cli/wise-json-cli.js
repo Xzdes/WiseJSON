@@ -9,7 +9,7 @@ const DB_PATH = process.env.WISE_JSON_PATH || path.resolve(process.cwd(), 'wise-
 const LANG = (
     (process.env.WISE_JSON_LANG || '')
         .toLowerCase()
-        .replace(/"/g, '') || // remove possible quotes
+        .replace(/"/g, '') ||
     (process.argv.includes('--lang=ru') ? 'ru' : '') ||
     (process.argv.includes('--lang=en') ? 'en' : '')
 ) || 'en';
@@ -27,8 +27,9 @@ wise-json-cli <команда> [опции]
     insert-many <collection> <file.json> [--ttl <ms>]
         - Вставить пакет документов из файла (массив JSON)
         - Опционально: TTL (время жизни, мс)
-    find <collection> [query]
-        - Найти документы (query — JS-функция-предикат как строка)
+    find <collection> [query] [--unsafe-eval]
+        - Найти документы (query — или JS-функция-предикат как строка, или JSON-фильтр)
+        - Для eval-предиката требуется флаг --unsafe-eval!
     get <collection> <id>
         - Получить документ по id
     remove <collection> <id>
@@ -60,8 +61,9 @@ wise-json-cli <command> [options]
     insert-many <collection> <file.json> [--ttl <ms>]
         - Batch insert documents from a file (JSON array)
         - Optional: TTL (time to live, ms)
-    find <collection> [query]
-        - Find documents (query is a JS predicate function as string)
+    find <collection> [query] [--unsafe-eval]
+        - Find documents (query is either a JS predicate function string, or a JSON filter object)
+        - For eval-predicate, --unsafe-eval flag is required!
     get <collection> <id>
         - Get document by id
     remove <collection> <id>
@@ -84,15 +86,22 @@ function printHelp() {
     console.log(LANG === 'ru' ? RU_HELP : EN_HELP);
 }
 
+function prettyError(msg, code = 1) {
+    console.error('\x1b[31m%s\x1b[0m', msg);
+    process.exit(code);
+}
+
 async function main() {
     const args = process.argv.slice(2).filter(x => !x.startsWith('--lang='));
+    const UNSAFE_EVAL = args.includes('--unsafe-eval');
+    const cleanArgs = args.filter(a => a !== '--unsafe-eval');
 
-    if (args.length === 0 || args[0] === 'help' || args[0] === '--help') {
+    if (cleanArgs.length === 0 || cleanArgs[0] === 'help' || cleanArgs[0] === '--help') {
         printHelp();
         process.exit(0);
     }
 
-    const command = args[0];
+    const command = cleanArgs[0];
 
     // --- list
     if (command === 'list') {
@@ -104,10 +113,10 @@ async function main() {
     }
 
     // --- info
-    if (command === 'info' && args[1]) {
+    if (command === 'info' && cleanArgs[1]) {
         const db = new WiseJSON(DB_PATH);
         await db.init();
-        const collection = await db.collection(args[1]);
+        const collection = await db.collection(cleanArgs[1]);
         await collection.initPromise;
         const stats = await collection.stats();
         const indexes = await collection.getIndexes();
@@ -122,17 +131,16 @@ async function main() {
     }
 
     // --- insert
-    if (command === 'insert' && args[1] && args[2]) {
+    if (command === 'insert' && cleanArgs[1] && cleanArgs[2]) {
         const db = new WiseJSON(DB_PATH);
         await db.init();
-        const collection = await db.collection(args[1]);
+        const collection = await db.collection(cleanArgs[1]);
         await collection.initPromise;
         let doc;
         try {
-            doc = JSON.parse(args[2]);
+            doc = JSON.parse(cleanArgs[2]);
         } catch (e) {
-            console.error(LANG === 'ru' ? 'Ошибка парсинга JSON' : 'JSON parse error');
-            process.exit(1);
+            prettyError(LANG === 'ru' ? 'Ошибка парсинга JSON' : 'JSON parse error');
         }
         await collection.insert(doc);
         console.log((LANG === 'ru' ? 'Вставлено:' : 'Inserted:'), doc);
@@ -140,23 +148,22 @@ async function main() {
     }
 
     // --- insert-many
-    if (command === 'insert-many' && args[1] && args[2]) {
+    if (command === 'insert-many' && cleanArgs[1] && cleanArgs[2]) {
         const db = new WiseJSON(DB_PATH);
         await db.init();
-        const collection = await db.collection(args[1]);
+        const collection = await db.collection(cleanArgs[1]);
         await collection.initPromise;
-        const file = args[2];
+        const file = cleanArgs[2];
         let data;
         try {
             data = JSON.parse(await fs.readFile(file, 'utf8'));
         } catch (e) {
-            console.error(LANG === 'ru' ? 'Ошибка чтения или парсинга файла' : 'File read or parse error');
-            process.exit(1);
+            prettyError(LANG === 'ru' ? 'Ошибка чтения или парсинга файла' : 'File read or parse error');
         }
-        let ttlArg = args.findIndex(a => a === '--ttl');
+        let ttlArg = cleanArgs.findIndex(a => a === '--ttl');
         let ttl = null;
-        if (ttlArg !== -1 && args[ttlArg + 1]) {
-            ttl = parseInt(args[ttlArg + 1], 10);
+        if (ttlArg !== -1 && cleanArgs[ttlArg + 1]) {
+            ttl = parseInt(cleanArgs[ttlArg + 1], 10);
         }
         const now = Date.now();
         if (ttl) {
@@ -171,53 +178,82 @@ async function main() {
         process.exit(0);
     }
 
-    // --- find
-    if (command === 'find' && args[1]) {
+    // --- find (safe: поддержка JSON-фильтра + eval только по флагу)
+    if (command === 'find' && cleanArgs[1]) {
         const db = new WiseJSON(DB_PATH);
         await db.init();
-        const collection = await db.collection(args[1]);
+        const collection = await db.collection(cleanArgs[1]);
         await collection.initPromise;
-        let queryFn = () => true;
-        if (args[2]) {
-            // Юзер может передать функцию
-            queryFn = eval(`(${args[2]})`);
+
+        let docs;
+        // Если задан eval-фильтр и пользователь явно согласился на eval
+        if (cleanArgs[2] && UNSAFE_EVAL) {
+            try {
+                // Предупреждение!
+                console.warn('\x1b[33m%s\x1b[0m',
+                    LANG === 'ru'
+                        ? '[ВНИМАНИЕ] Использование eval-фильтра может быть ОПАСНО! Не используйте с непроверенными данными.'
+                        : '[WARNING] Using eval-predicate may be UNSAFE! Do not use with untrusted data.'
+                );
+                // eslint-disable-next-line no-eval
+                const queryFn = eval(`(${cleanArgs[2]})`);
+                docs = await collection.find(queryFn);
+            } catch (e) {
+                prettyError(LANG === 'ru' ? 'Ошибка в функции фильтра (eval)' : 'Filter function (eval) error');
+            }
+        } else if (cleanArgs[2]) {
+            // Попробуем как JSON-фильтр (простой поиск по полям)
+            let filter;
+            try {
+                filter = JSON.parse(cleanArgs[2]);
+            } catch (e) {
+                prettyError(
+                    LANG === 'ru'
+                        ? 'Ошибка парсинга фильтра. Для произвольных JS-фильтров используйте --unsafe-eval.'
+                        : 'Filter parse error. For arbitrary JS filter use --unsafe-eval.'
+                );
+            }
+            docs = await collection.find(doc =>
+                Object.entries(filter).every(([k, v]) => doc[k] === v)
+            );
+        } else {
+            docs = await collection.find(() => true);
         }
-        const docs = await collection.find(queryFn);
         console.log(JSON.stringify(docs, null, 2));
         process.exit(0);
     }
 
     // --- get
-    if (command === 'get' && args[1] && args[2]) {
+    if (command === 'get' && cleanArgs[1] && cleanArgs[2]) {
         const db = new WiseJSON(DB_PATH);
         await db.init();
-        const collection = await db.collection(args[1]);
+        const collection = await db.collection(cleanArgs[1]);
         await collection.initPromise;
-        const doc = await collection.getById(args[2]);
+        const doc = await collection.getById(cleanArgs[2]);
         console.log(JSON.stringify(doc, null, 2));
         process.exit(0);
     }
 
     // --- remove
-    if (command === 'remove' && args[1] && args[2]) {
+    if (command === 'remove' && cleanArgs[1] && cleanArgs[2]) {
         const db = new WiseJSON(DB_PATH);
         await db.init();
-        const collection = await db.collection(args[1]);
+        const collection = await db.collection(cleanArgs[1]);
         await collection.initPromise;
-        await collection.remove(args[2]);
+        await collection.remove(cleanArgs[2]);
         console.log(
             LANG === 'ru'
-                ? `Удалён: ${args[2]}`
-                : `Removed ${args[2]}`
+                ? `Удалён: ${cleanArgs[2]}`
+                : `Removed ${cleanArgs[2]}`
         );
         process.exit(0);
     }
 
     // --- clear
-    if (command === 'clear' && args[1]) {
+    if (command === 'clear' && cleanArgs[1]) {
         const db = new WiseJSON(DB_PATH);
         await db.init();
-        const collection = await db.collection(args[1]);
+        const collection = await db.collection(cleanArgs[1]);
         await collection.initPromise;
         await collection.clear();
         console.log(
@@ -229,50 +265,49 @@ async function main() {
     }
 
     // --- export
-    if (command === 'export' && args[1] && args[2]) {
+    if (command === 'export' && cleanArgs[1] && cleanArgs[2]) {
         const db = new WiseJSON(DB_PATH);
         await db.init();
-        const collection = await db.collection(args[1]);
+        const collection = await db.collection(cleanArgs[1]);
         await collection.initPromise;
         const docs = await collection.getAll();
-        await fs.writeFile(args[2], JSON.stringify(docs, null, 2), 'utf8');
+        await fs.writeFile(cleanArgs[2], JSON.stringify(docs, null, 2), 'utf8');
         console.log(
             LANG === 'ru'
-                ? `Экспортировано ${docs.length} документов в ${args[2]}.`
-                : `Exported ${docs.length} documents to ${args[2]}.`
+                ? `Экспортировано ${docs.length} документов в ${cleanArgs[2]}.`
+                : `Exported ${docs.length} documents to ${cleanArgs[2]}.`
         );
         process.exit(0);
     }
 
     // --- import
-    if (command === 'import' && args[1] && args[2]) {
+    if (command === 'import' && cleanArgs[1] && cleanArgs[2]) {
         const db = new WiseJSON(DB_PATH);
         await db.init();
-        const collection = await db.collection(args[1]);
+        const collection = await db.collection(cleanArgs[1]);
         await collection.initPromise;
         let data;
         try {
-            data = JSON.parse(await fs.readFile(args[2], 'utf8'));
+            data = JSON.parse(await fs.readFile(cleanArgs[2], 'utf8'));
         } catch (e) {
-            console.error(LANG === 'ru' ? 'Ошибка чтения или парсинга файла' : 'File read or parse error');
-            process.exit(1);
+            prettyError(LANG === 'ru' ? 'Ошибка чтения или парсинга файла' : 'File read or parse error');
         }
         const inserted = await collection.insertMany(data);
         console.log(
             LANG === 'ru'
-                ? `Импортировано ${inserted.length} документов из ${args[2]}.`
-                : `Imported ${inserted.length} documents from ${args[2]}.`
+                ? `Импортировано ${inserted.length} документов из ${cleanArgs[2]}.`
+                : `Imported ${inserted.length} documents from ${cleanArgs[2]}.`
         );
         process.exit(0);
     }
 
     // --- unknown command
-    console.error(
+    prettyError(
         LANG === 'ru'
             ? 'Неизвестная команда. Используйте "help" для справки.'
-            : 'Unknown command. Use "help" for usage.'
+            : 'Unknown command. Use "help" for usage.',
+        1
     );
-    process.exit(1);
 }
 
 main();

@@ -74,7 +74,8 @@ function createCheckpointController({ collectionName, collectionDirPath, documen
             segmentFiles.push(dataFile);
         }
 
-        return { metaFile, segmentFiles };
+        // --- Вернём meta, metaFile и segmentFiles!
+        return { metaFile, segmentFiles, meta };
     }
 
     function startCheckpointTimer(intervalMs = 60 * 1000) {
