@@ -67,13 +67,13 @@ operating entirely as files without servers or external dependencies.
 ## Installation
 
 ```bash
-npm install wise-json
+npm install wise-json-db
 ```
 
 For global CLI installation:
 
 ```bash
-npm install -g wise-json
+npm install -g wise-json-db
 ```
 
 ---

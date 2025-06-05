@@ -67,13 +67,13 @@
 ## Установка
 
 ```bash
-npm install wise-json
+npm install wise-json-db
 ```
 
 Для глобальной установки CLI:
 
 ```bash
-npm install -g wise-json
+npm install -g wise-json-db
 ```
 
 ---
