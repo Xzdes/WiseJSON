@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WiseJSON Data Explorer</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <header>
+        <h1>WiseJSON Data Explorer</h1>
+    </header>
+
+    <main>
+        <section>
+            <label for="collectionSelect">Select Collection:</label>
+            <select id="collectionSelect"></select>
+            <button id="loadBtn">Load</button>
+        </section>
+
+        <section id="filters">
+            <label for="filterName">Filter by Name:</label>
+            <input type="text" id="filterName" placeholder="e.g. User5">
+            <button id="applyFilterBtn">Apply Filter</button>
+        </section>
+
+        <section id="paginationOptions">
+            <label for="pageSizeInput">Rows per page:</label>
+            <input type="number" id="pageSizeInput" min="1" value="10">
+        </section>
+
+        <section id="tableContainer">
+            <table id="dataTable">
+                <thead></thead>
+                <tbody></tbody>
+            </table>
+        </section>
+
+        <section id="pagination">
+            <button id="prevBtn">Previous</button>
+            <button id="nextBtn">Next</button>
+        </section>
+
+        <section id="viewer">
+            <h3>Document Viewer</h3>
+            <textarea id="documentViewer" rows="10" readonly></textarea>
+        </section>
+    </main>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

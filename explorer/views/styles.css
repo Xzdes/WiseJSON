@@ -1,0 +1,136 @@
+/* explorer/views/styles.css */
+
+body {
+    font-family: Arial, sans-serif;
+    background-color: #f5f2f8;
+    margin: 0;
+    padding: 20px;
+    color: #333;
+}
+
+header {
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+header h1 {
+    margin: 0;
+    color: #4c2d73; /* Глубокий фиолетовый */
+}
+
+main {
+    max-width: 1000px;
+    margin: 0 auto;
+    background-color: #fff;
+    padding: 20px;
+    border-radius: 8px;
+    border: 2px solid #b89ccf;
+    box-shadow: 0 4px 8px rgba(76, 45, 115, 0.1);
+}
+
+section {
+    margin-bottom: 20px;
+}
+
+label {
+    font-weight: bold;
+    margin-right: 10px;
+    color: #4c2d73;
+}
+
+input[type="text"],
+input[type="number"],
+select,
+textarea {
+    width: 100%;
+    max-width: 300px;
+    padding: 8px 12px;
+    border: 1px solid #b89ccf;
+    border-radius: 4px;
+    font-size: 14px;
+    background-color: #f7f4fb;
+    color: #333;
+    box-sizing: border-box;
+}
+
+input[type="text"]:focus,
+input[type="number"]:focus,
+select:focus,
+textarea:focus {
+    border-color: #8d6fb3;
+    outline: none;
+}
+
+button {
+    padding: 8px 16px;
+    margin-top: 5px;
+    background-color: #7a56a2;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+}
+
+button:hover {
+    background-color: #684c8c;
+}
+
+#dataTable {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+    word-wrap: break-word;
+}
+
+#dataTable th,
+#dataTable td {
+    border: 1px solid #ddd;
+    padding: 8px;
+}
+
+#dataTable th {
+    background-color: #ebe2f4;
+    text-align: left;
+    color: #4c2d73;
+}
+
+#pagination {
+    text-align: center;
+}
+
+#documentViewer {
+    width: 100%;
+    font-family: monospace;
+    font-size: 14px;
+    background-color: #f7f4fb;
+    border: 1px solid #b89ccf;
+    border-radius: 4px;
+    padding: 10px;
+    box-sizing: border-box;
+    resize: vertical;
+    color: #333;
+}
+
+/* Адаптивность */
+@media (max-width: 768px) {
+    main {
+        padding: 15px;
+    }
+
+    label, button, select, input, textarea {
+        font-size: 16px;
+        width: 100%;
+        max-width: 100%;
+        margin-top: 5px;
+    }
+
+    button {
+        width: 100%;
+    }
+
+    #dataTable th, #dataTable td {
+        padding: 6px;
+        font-size: 14px;
+    }
+}

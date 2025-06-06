@@ -1,5 +1,9 @@
+// wise-json/collection/core.js
+
 const path = require('path');
 const fs = require('fs/promises');
+const fssync = require('fs');
+const { createWriteStream } = require('fs');
 const CollectionEventEmitter = require('./events.js');
 const createWalOps = require('./wal-ops.js');
 const IndexManager = require('./indexes.js');
@@ -73,7 +77,6 @@ class Collection {
         await fs.mkdir(this.collectionDirPath, { recursive: true });
         await initializeWal(this.walPath, this.collectionDirPath);
 
-        // 1. Загружаем последний чекпоинт
         const loaded = await loadLatestCheckpoint(
             path.join(this.collectionDirPath, '_checkpoints'),
             this.name
@@ -99,35 +102,29 @@ class Collection {
             }
         }
 
-        // 2. Проигрываем WAL — это ДОПОЛНЕНИЕ к чекпоинту
         const walEntries = await readWal(this.walPath, loaded.timestamp);
         if (walEntries.length > 0) {
             console.log(`[WiseJSON] 📝 Applying ${walEntries.length} WAL entries for collection: ${this.name}`);
         }
         for (const entry of walEntries) {
-            // Если операция — из транзакции, применяем только если есть COMMIT
             if (entry.txn === 'op' && entry._txn_applied) {
                 await this._applyTransactionWalOp(entry);
             } else if (!entry.txn) {
                 this.applyWalEntryToMemory(entry, false);
             }
-            // Прочие случаи — игнорируем (незавершённые транзакции не применяются)
         }
 
         this._indexManager.rebuildIndexesFromData(this.documents);
-
         this._checkpoint.startCheckpointTimer();
-
         this._lastCheckpointTimestamp = loaded.timestamp || null;
     }
 
-    // --- AUTO TTL CLEANUP ---
     _startTtlCleanupTimer() {
         this._stopTtlCleanupTimer();
         this._ttlCleanupTimer = setInterval(() => {
             const removed = cleanupExpiredDocs(this.documents, this._indexManager);
             if (removed > 0) {
-                console.log(`[WiseJSON] [TTL] Auto-cleanup: удалено ${removed} протухших документов (collection: ${this.name})`);
+                console.log(`[WiseJSON] [TTL] Auto-cleanup: удалено ${removed} документов (collection: ${this.name})`);
             }
         }, this._ttlCleanupIntervalMs);
     }
@@ -138,8 +135,6 @@ class Collection {
             this._ttlCleanupTimer = null;
         }
     }
-    // --- END AUTO TTL CLEANUP ---
-
     async _enqueue(opFn) {
         return new Promise((resolve, reject) => {
             this._writeQueue.push({ opFn, resolve, reject });
@@ -149,10 +144,8 @@ class Collection {
 
     async _processQueue() {
         if (this._writing || this._writeQueue.length === 0) return;
-
         this._writing = true;
         const task = this._writeQueue.shift();
-
         try {
             const result = await task.opFn();
             task.resolve(result);
@@ -164,27 +157,17 @@ class Collection {
         }
     }
 
-    // === Обычные методы ===
-
     async insert(doc) {
         if (!isPlainObject(doc)) throw new Error('insert: аргумент должен быть объектом.');
-
         return this._enqueue(async () => {
             const _id = doc._id || this._idGenerator();
             const now = new Date().toISOString();
-            const finalDoc = {
-                ...doc,
-                _id,
-                createdAt: doc.createdAt || now,
-                updatedAt: doc.updatedAt || now,
-            };
-
+            const finalDoc = { ...doc, _id, createdAt: now, updatedAt: now };
             const result = await this._enqueueDataModification(
                 { op: 'INSERT', doc: finalDoc },
                 'INSERT',
                 (_, inserted) => inserted
             );
-
             this._stats.inserts++;
             console.log(`[WiseJSON] Inserted document with _id: ${_id} in collection: ${this.name}`);
             return result;
@@ -197,10 +180,9 @@ class Collection {
         const prepared = docs.map(doc => ({
             ...doc,
             _id: doc._id || this._idGenerator(),
-            createdAt: doc.createdAt || now,
-            updatedAt: doc.updatedAt || now,
+            createdAt: now,
+            updatedAt: now
         }));
-
         return this._enqueue(async () => {
             await this._enqueueDataModification(
                 { op: 'BATCH_INSERT', docs: prepared },
@@ -213,10 +195,13 @@ class Collection {
         });
     }
 
+    async insertManyBatch(docs) {
+        return this.insertMany(docs);
+    }
+
     async update(id, updates) {
         if (!this.documents.has(id)) throw new Error(`update: документ с id "${id}" не найден.`);
         if (!isPlainObject(updates)) throw new Error('update: обновления должны быть объектом.');
-
         return this._enqueue(async () => {
             const now = new Date().toISOString();
             const result = await this._enqueueDataModification(
@@ -231,12 +216,6 @@ class Collection {
         });
     }
 
-    /**
-     * Массовое обновление: обновляет все документы, удовлетворяющие queryFn.
-     * @param {Function} queryFn - функция-фильтр (doc) => boolean
-     * @param {Object} updates - объект с полями для обновления
-     * @returns {number} Количество обновлённых документов
-     */
     async updateMany(queryFn, updates) {
         let count = 0;
         for (const [id, doc] of this.documents.entries()) {
@@ -248,9 +227,12 @@ class Collection {
         return count;
     }
 
+    async updateManyBatch(queryFn, updates) {
+        return this.updateMany(queryFn, updates);
+    }
+
     async remove(id) {
         if (!this.documents.has(id)) return false;
-
         return this._enqueue(async () => {
             const result = await this._enqueueDataModification(
                 { op: 'REMOVE', id },
@@ -321,13 +303,6 @@ class Collection {
         return this._indexManager.getIndexesMeta();
     }
 
-    async findOneByIndexedValue(fieldName, value) {
-        cleanupExpiredDocs(this.documents, this._indexManager);
-        const id = this._indexManager.findOneIdByIndex(fieldName, value);
-        const doc = id ? this.documents.get(id) || null : null;
-        return (doc && isAlive(doc)) ? doc : null;
-    }
-
     async findByIndexedValue(fieldName, value) {
         cleanupExpiredDocs(this.documents, this._indexManager);
         const idx = this._indexManager.indexes.get(fieldName);
@@ -344,6 +319,53 @@ class Collection {
             .filter(isAlive);
     }
 
+    async findOneByIndexedValue(fieldName, value) {
+        const results = await this.findByIndexedValue(fieldName, value);
+        return results.length > 0 ? results[0] : null;
+    }
+    async exportJson(filePath, options = {}) {
+        const docs = await this.getAll();
+        const stream = createWriteStream(filePath, { encoding: 'utf8' });
+        stream.write('[');
+        for (let i = 0; i < docs.length; i++) {
+            const json = JSON.stringify(docs[i]);
+            stream.write(json);
+            if (i < docs.length - 1) {
+                stream.write(',\n');
+            }
+        }
+        stream.write(']');
+        stream.end();
+        console.log(`[WiseJSON] Exported ${docs.length} documents to ${filePath}`);
+    }
+
+    async exportCsv(filePath) {
+    const { flattenDocToCsv } = require('../../explorer/utils.js');
+    const docs = await this.getAll();
+    if (docs.length === 0) {
+        await fs.writeFile(filePath, '', 'utf8');
+        console.log(`[WiseJSON] No documents to export in CSV.`);
+        return;
+    }
+    const csv = flattenDocToCsv(docs);
+    await fs.writeFile(filePath, csv, 'utf8');
+    console.log(`[WiseJSON] Exported ${docs.length} documents to ${filePath} (CSV)`);
+}
+
+
+    async importJson(filePath, options = {}) {
+        const mode = options.mode || 'append';
+        const data = JSON.parse(await fs.readFile(filePath, 'utf8'));
+        if (!Array.isArray(data)) {
+            throw new Error(`Import file must contain JSON array`);
+        }
+        if (mode === 'replace') {
+            await this.clear();
+        }
+        await this.insertMany(data);
+        console.log(`[WiseJSON] Imported ${data.length} documents from ${filePath} (mode: ${mode})`);
+    }
+
     on(eventName, listener) {
         this._emitter.on(eventName, listener);
     }
@@ -355,16 +377,12 @@ class Collection {
     async flushToDisk() {
         cleanupExpiredDocs(this.documents, this._indexManager);
         const checkpointResult = await this._checkpoint.saveCheckpoint();
-
-        // Теперь НЕ парсим имя файла — используем checkpointResult.meta.timestamp!
         let lastCheckpointTimestamp = null;
         if (checkpointResult && checkpointResult.meta && checkpointResult.meta.timestamp) {
             lastCheckpointTimestamp = checkpointResult.meta.timestamp;
         }
         this._lastCheckpointTimestamp = lastCheckpointTimestamp || new Date().toISOString();
-
         await compactWal(this.walPath, this._lastCheckpointTimestamp);
-
         console.log(`[WiseJSON] Saved checkpoint for collection: ${this.name}`);
         return checkpointResult;
     }
@@ -387,19 +405,30 @@ class Collection {
         };
     }
 
-    // === Транзакционные методы ===
+    async _applyTransactionWalOp(entry) {
+        switch (entry.type) {
+            case 'insert':
+                await this._applyTransactionInsert(entry.args[0], entry.txid);
+                break;
+            case 'insertMany':
+                await this._applyTransactionInsertMany(entry.args[0], entry.txid);
+                break;
+            case 'update':
+                await this._applyTransactionUpdate(entry.args[0], entry.args[1], entry.txid);
+                break;
+            case 'remove':
+                await this._applyTransactionRemove(entry.args[0], entry.txid);
+                break;
+            case 'clear':
+                await this._applyTransactionClear(entry.txid);
+                break;
+        }
+    }
 
     async _applyTransactionInsert(doc, txid) {
-        // Не пишем в WAL — уже записано!
         const _id = doc._id || this._idGenerator();
         const now = new Date().toISOString();
-        const finalDoc = {
-            ...doc,
-            _id,
-            createdAt: doc.createdAt || now,
-            updatedAt: doc.updatedAt || now,
-            _txn: txid
-        };
+        const finalDoc = { ...doc, _id, createdAt: doc.createdAt || now, updatedAt: doc.updatedAt || now, _txn: txid };
         this.documents.set(_id, finalDoc);
         this._indexManager.afterInsert(finalDoc);
         this._stats.inserts++;
@@ -411,13 +440,7 @@ class Collection {
         const now = new Date().toISOString();
         for (const doc of docs) {
             const _id = doc._id || this._idGenerator();
-            const finalDoc = {
-                ...doc,
-                _id,
-                createdAt: doc.createdAt || now,
-                updatedAt: doc.updatedAt || now,
-                _txn: txid
-            };
+            const finalDoc = { ...doc, _id, createdAt: doc.createdAt || now, updatedAt: doc.updatedAt || now, _txn: txid };
             this.documents.set(_id, finalDoc);
             this._indexManager.afterInsert(finalDoc);
             this._stats.inserts++;
@@ -430,12 +453,7 @@ class Collection {
         const oldDoc = this.documents.get(id);
         if (!oldDoc) return null;
         const now = new Date().toISOString();
-        const newDoc = {
-            ...oldDoc,
-            ...updates,
-            updatedAt: now,
-            _txn: txid
-        };
+        const newDoc = { ...oldDoc, ...updates, updatedAt: now, _txn: txid };
         this.documents.set(id, newDoc);
         this._indexManager.afterUpdate(oldDoc, newDoc);
         this._stats.updates++;
@@ -462,28 +480,6 @@ class Collection {
         this._stats.clears++;
         this._emitter.emit('clear');
         return true;
-    }
-
-    // Применение операции из транзакционного WAL при восстановлении
-    async _applyTransactionWalOp(entry) {
-        // entry: {txn:'op', col, type, args, ...}
-        switch (entry.type) {
-            case 'insert':
-                await this._applyTransactionInsert(entry.args[0], entry.txid);
-                break;
-            case 'insertMany':
-                await this._applyTransactionInsertMany(entry.args[0], entry.txid);
-                break;
-            case 'update':
-                await this._applyTransactionUpdate(entry.args[0], entry.args[1], entry.txid);
-                break;
-            case 'remove':
-                await this._applyTransactionRemove(entry.args[0], entry.txid);
-                break;
-            case 'clear':
-                await this._applyTransactionClear(entry.txid);
-                break;
-        }
     }
 }
 
