@@ -1,209 +1,240 @@
-# WiseJSON Data Explorer
+# 📦 WiseJSON DB
 
-🚀 A powerful, lightweight, and user-friendly tool for managing JSON documents in WiseJSON — manage collections, documents, indexing, exporting, and importing.
+![WiseJSON Logo](logo.png)
 
----
+![npm version](https://npmjs.org/package/wise-json-db)
+![License](https://github.com/Xzdes/WiseJSON/blob/master/LICENSE)
+![Node.js CI](https://github.com/Xzdes/WiseJSON/actions/workflows/nodejs.yml)
 
-## 📦 Project Links
-
-- 🐙 GitHub: [https://github.com/Xzdes/WiseJSON](https://github.com/Xzdes/WiseJSON)
-- 📦 NPM: [https://www.npmjs.com/package/wise-json-db](https://www.npmjs.com/package/wise-json-db)
-
----
-
-## ❓ What is WiseJSON?
-
-WiseJSON is a high-performance JSON document database featuring transactions, WAL (write-ahead logging), TTL (document expiration), indexing, and checkpoints for reliable recovery.
-
-WiseJSON Data Explorer is a powerful extension for managing WiseJSON data through:
-✅ A flexible CLI  
-✅ A minimalistic REST API  
-✅ An intuitive web interface
+**WiseJSON DB** is an incredibly fast, crash-proof, embedded JSON database for Node.js, supporting batch operations, TTL (Time-To-Live), indexes, and segmented checkpoints. It’s designed for high performance, reliability, and seamless integration into your Node.js applications.
 
 ---
 
 ## 🚀 Key Features
 
-### 🖥️ CLI (Command Line Interface)
+* **High Performance:** Fast read and write operations.
+* **Crash-Proof & Durable:**
 
-- 📂 **List Collections**  
-  `list-collections` — shows all collections with document counts.
+  * **WAL (Write-Ahead Logging):** All changes are first written to a log for data recovery after crashes.
+  * **Checkpoints:** Periodic snapshots for quick recovery.
+  * **Segmented Checkpoints:** For better performance on large collections.
+  * **Atomic File Writes:** Safe JSON saving using temporary files.
+* **ACID Transactions:** Atomic transactions across multiple collections.
+* **Indexes:** Unique and non-unique indexes for faster queries.
+* **TTL (Time-To-Live):** Automatic removal of expired documents.
+* **Batch Operations:** Efficient `insertMany` and `updateMany`.
+* **Embedded & File-Based:** Stores data locally without a separate server.
+* **Simple API:** Intuitive work with collections and documents.
+* **Tooling:**
 
-- 🔎 **View Collection**  
-  `show-collection <collectionName>` — view documents with:
-  - `--limit`, `--offset` — pagination
-  - `--sort`, `--order` — sorting
-  - `--filter` — JSON string filtering
-  - `--output json|csv` — output format
-  - `--file` — export to a file.
-
-- 📑 **Get Document**  
-  `get-document <collectionName> <documentId>` — view a single document.
-
-- 📊 **Collection Stats**  
-  `collection-stats <collectionName>` — document count, indexes.
-
-- 🔄 **Import**  
-  `import-collection <collectionName> <file.json>` — import JSON data (requires `--allow-write`).
-
-- 💾 **Export**  
-  `export-collection <collectionName> <file.json|csv>` — export to JSON or CSV.
-
-- 🔍 **Indexes**  
-  - `list-indexes <collectionName>` — list indexes.  
-  - `create-index <collectionName> <fieldName> [--unique]` — create index.  
-  - `drop-index <collectionName> <fieldName>` — delete index.
+  * **Basic CLI (`wise-json`):** For core DB operations.
+  * **Data Explorer (web interface & advanced CLI `wisejson-explorer`).**
+* **Lightweight:** Minimal dependencies (only `uuid`).
+* **Graceful Shutdown:** Automatic data saving on proper application termination.
+* **Custom ID Generator:** Allows you to set your own `_id` function.
 
 ---
 
-### 🌐 HTTP API
+## 💡 Why WiseJSON DB?
 
-- `GET /api/collections` — list all collections.
-- `GET /api/collections/:name` — get documents with:
-  - `limit`, `offset`
-  - `sort`, `order`
-  - `filter_<field>=value`
-- `GET /api/collections/:name/stats` — collection stats.
-- `GET /api/collections/:name/doc/:id` — get a single document.
+* **Reliability:** WAL and checkpoints ensure data safety even during crashes.
+* **Speed:** Indexes and optimization speed up data access.
+* **Easy Integration:** No external services required.
+* **Full Control:** Data is stored locally.
+* **JSON Flexibility:** Natively stores complex structured data.
 
 ---
 
-### 🖼️ Web Interface
-
-- 📋 Select a collection and view documents.  
-- 🔄 Pagination, sorting, filtering.  
-- 🔎 View JSON in a textarea (easy to copy).  
-- ⚙️ Set the number of documents per page.  
-- 🎨 Light purple, adaptive design.  
-- 🚀 Fast load with vanilla JS and CSS.
-
----
-
-## 🌟 Advantages
-
-✅ **Quick to Start** — no dependencies except Node.js, ready to use.  
-✅ **ReadOnly Mode by Default** — protects against accidental changes, use `--allow-write` for write operations.  
-✅ **Reliable WAL and Checkpoints** — high performance and durability.  
-✅ **TTL Support** — automatically remove outdated documents.  
-✅ **Indexes** — fast queries on fields.  
-✅ **JSON and CSV Exports** — supports flat and nested structures (CSV currently flat).  
-✅ **Minimalist, User-Friendly UI** — no frameworks.  
-✅ **Cross-platform** — Windows, Linux, macOS.  
-✅ **Tested** — extensive CLI and API tests.
-
----
-
-## ⚠️ Limitations
-
-⚠️ No editing via API yet (CLI only).  
-⚠️ CSV export is basic (flattened).  
-⚠️ No authentication (planned).  
-⚠️ No interactive REPL in CLI yet.  
-⚠️ CLI JSON filtering requires escaped quotes on Windows.
-
----
-
-## 🚀 Getting Started
-
-### 1️⃣ Install
+## 📥 Installation
 
 ```bash
-git clone https://github.com/Xzdes/WiseJSON
-cd WiseJSON
-npm install
-````
-
----
-
-### 2️⃣ Run the Web Server & API
-
-```bash
-npm run start-explorer
+npm install wise-json-db
+# or
+yarn add wise-json-db
 ```
 
-Then open: [http://127.0.0.1:3000](http://127.0.0.1:3000)
+---
+
+## 📚 Basic Usage (API)
+
+```javascript
+const WiseJSON = require('wise-json-db');
+const path = require('path');
+
+const dbPath = path.resolve(__dirname, 'myDataBase');
+
+async function main() {
+  const db = new WiseJSON(dbPath, {
+    ttlCleanupIntervalMs: 60000
+  });
+  await db.init();
+
+  const users = await db.collection('users');
+  await users.initPromise;
+
+  const user1 = await users.insert({ name: 'Alice', age: 30, city: 'New York' });
+  console.log('Inserted user:', user1);
+
+  const userBatch = await users.insertMany([
+    { name: 'Bob', age: 24, city: 'London' },
+    { name: 'Charlie', age: 35, city: 'Paris', tags: ['dev', 'cat_lover'] }
+  ]);
+  console.log(`Inserted ${userBatch.length} users.`);
+
+  const allUsers = await users.getAll();
+  console.log('All users:', allUsers.length);
+
+  const usersFromLondon = await users.find(user => user.city === 'London');
+  console.log('Users from London:', usersFromLondon);
+
+  const devUser = await users.findOne(user => user.tags && user.tags.includes('dev'));
+  console.log('First developer:', devUser);
+
+  if (devUser) {
+    const updatedDevUser = await users.update(devUser._id, { age: devUser.age + 1, lastLogin: new Date().toISOString() });
+    console.log('Updated developer:', updatedDevUser);
+  }
+
+  const updatedCount = await users.updateMany(
+    (user) => user.age > 30,
+    { status: 'senior' }
+  );
+  console.log(`Updated ${updatedCount} users (status senior).`);
+
+  await users.createIndex('city');
+  await users.createIndex('name', { unique: true });
+
+  const usersFromParisByIndex = await users.findByIndexedValue('city', 'Paris');
+  console.log('Users from Paris (by index):', usersFromParisByIndex);
+
+  const bobByName = await users.findOneByIndexedValue('name', 'Bob');
+  console.log('Bob (by unique name index):', bobByName);
+
+  console.log('Current indexes:', await users.getIndexes());
+
+  const temporaryData = await users.insert({
+    message: 'This message will self-destruct in 5 seconds',
+    expireAt: Date.now() + 5000
+  });
+  console.log('Inserted temporary data:', temporaryData._id);
+
+  const txn = db.beginTransaction();
+  try {
+    const logs = await db.collection('logs');
+    await logs.initPromise;
+
+    await txn.collection('users').insert({ name: 'Diana In Txn', age: 28 });
+    await txn.collection('logs').insert({ action: 'USER_CREATED', user: 'Diana In Txn', timestamp: Date.now() });
+    await txn.commit();
+    console.log('Transaction completed successfully.');
+  } catch (error) {
+    await txn.rollback();
+    console.error('Transaction error, changes rolled back:', error);
+  }
+
+  console.log('Users collection stats:', await users.stats());
+
+  await db.close();
+  console.log('Database closed.');
+}
+
+main().catch(console.error);
+```
 
 ---
 
-### 3️⃣ Use the CLI
+## 🛠️ Command Line Interface (CLI)
 
-```bash
-node explorer/cli.js <command> [args] [options]
-```
+WiseJSON DB includes two CLI tools:
+
+### 1️⃣ Basic CLI: `wise-json`
 
 Example:
 
 ```bash
-node explorer/cli.js import-collection users users.json --mode replace --allow-write
+wise-json help
+wise-json list
+wise-json info <collection_name>
+wise-json insert <collection_name> '{"name":"John","age":30}'
+wise-json insert-many <collection_name> data.json
+wise-json insert-many <collection_name> data.json --ttl 3600000
+wise-json find <collection_name> '{"age":30}'
+wise-json get <collection_name> <document_id>
+wise-json remove <collection_name> <document_id>
+wise-json clear <collection_name>
+wise-json export <collection_name> export_data.json
+wise-json import <collection_name> import_data.json
 ```
 
----
+**Environment Variables:**
 
-## 🔒 ReadOnly Mode
+* `WISE_JSON_PATH`: Path to the database directory (default: `./wise-json-db-data`).
+* `WISE_JSON_LANG`: CLI language (`ru` or `en`, default: `en`).
 
-All write operations (import, index changes) require the `--allow-write` flag.
+### 2️⃣ Advanced CLI: `wisejson-explorer`
 
----
-
-## 🔍 Filtering
-
-CLI:
+Example:
 
 ```bash
---filter "{\"name\":\"User1\"}"
+wisejson-explorer --help
+wisejson-explorer list-collections
+wisejson-explorer show-collection <collection_name> --limit 5 --offset 0 --sort age --order desc
+wisejson-explorer export-collection <collection_name> data.json
+wisejson-explorer export-collection <collection_name> data.csv --output csv
+wisejson-explorer import-collection <collection_name> data.json --mode replace --allow-write
+wisejson-explorer create-index <collection_name> <field_name> --unique --allow-write
 ```
 
-API:
-
-```
-/api/collections/users?filter_name=User1
-```
+By default, `wisejson-explorer` runs in read-only mode. Use `--allow-write` for modifying data.
 
 ---
 
-## 🧪 Testing
+## 🌐 Data Explorer (Web UI)
+
+To run:
 
 ```bash
-node test/<test_name>.js
+node explorer/server.js
+# or
+wisejson-explorer-server
 ```
 
-Test coverage includes:
-
-* CLI: CSV export, errors, ReadOnly
-* API: pagination, sorting, filtering
-* 404 and error handling
+Default: [http://127.0.0.1:3000](http://127.0.0.1:3000).
 
 ---
 
-## 📁 Project Structure
+## ⚙️ Configuration
 
-```
-wise-json-npm-package/
-├── cli/
-├── explorer/
-│   ├── cli.js
-│   ├── server.js
-│   └── views/
-├── test/
-├── wise-json/
-├── package.json
-├── README.md
-├── README.ru.md
+```javascript
+const db = new WiseJSON('/path/to/db', {
+  ttlCleanupIntervalMs: 60000,
+  checkpointIntervalMs: 300000,
+  maxWalEntriesBeforeCheckpoint: 1000,
+  maxSegmentSizeBytes: 2 * 1024 * 1024,
+  checkpointsToKeep: 5,
+  idGenerator: () => `custom_${Date.now()}`,
+  walForceSync: false
+});
 ```
 
 ---
 
-## 🗓️ Roadmap
+## 🔒 Durability and Fault Tolerance
 
-* 📝 Editing documents via Web and API.
-* 🔍 Full-text search.
-* 🔐 Authentication.
-* 📈 Advanced CSV export.
-* 🎨 Improved UI/UX.
+WiseJSON DB uses WAL and checkpoints for data safety. WAL ensures recovery after crashes, while checkpoints capture the database state. Data is written atomically using temporary files.
 
 ---
 
-## ℹ️ Additional Info
+## 🤝 Contributing
 
-* 📦 NPM: [wise-json-db](https://www.npmjs.com/package/wise-json-db)
-* 🐙 GitHub: [Xzdes/WiseJSON](https://github.com/Xzdes/WiseJSON)
+We welcome:
+
+* Bug reports
+* Feature suggestions
+* Pull Requests
+
+---
+
+## 📄 License
+
+MIT License. Author: Xzdes [xzdes@yandex.ru](mailto:xzdes@yandex.ru)
