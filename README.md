@@ -2,9 +2,9 @@
 
 ![WiseJSON Logo](logo.png)
 
-npm version "https://npmjs.org/package/wise-json-db"
-License "https://github.com/Xzdes/WiseJSON/blob/master/LICENSE
-Node.js CI "https://github.com/Xzdes/WiseJSON/actions/workflows/nodejs.yml"
+[npm version](https://npmjs.org/package/wise-json-db)  
+[License](https://github.com/Xzdes/WiseJSON/blob/master/LICENSE)  
+[Node.js CI](https://github.com/Xzdes/WiseJSON/actions/workflows/nodejs.yml)
 
 **WiseJSON DB** is an incredibly fast, crash-proof, embedded JSON database for Node.js, supporting batch operations, TTL (Time-To-Live), indexes, and segmented checkpoints. It’s designed for high performance, reliability, and seamless integration into your Node.js applications.
 
