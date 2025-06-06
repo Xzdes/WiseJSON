@@ -36,6 +36,7 @@ async function main() {
     }
 
     let passed = 0, failed = 0;
+    const failedTests = [];
     for (const file of testFiles) {
         console.log(`\n===== Running: ${path.basename(file)} =====`);
         const result = await runTest(file);
@@ -45,12 +46,17 @@ async function main() {
         } else {
             console.log(`❌ FAILED: ${result.file} (exit code ${result.code})`);
             failed++;
+            failedTests.push(result.file);
         }
     }
 
     console.log('\n============================');
     console.log(`Total: ${testFiles.length}, Passed: ${passed}, Failed: ${failed}`);
     if (failed > 0) {
+        console.log('\nFAILED TESTS:');
+        for (const file of failedTests) {
+            console.log(` - ${file}`);
+        }
         process.exit(1);
     } else {
         console.log('ALL TESTS PASSED!');

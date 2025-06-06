@@ -44,73 +44,10 @@ function escapeHtml(str) {
         .replace(/'/g, '&#039;');
 }
 
-/**
- * Преобразует JSON документы в CSV-строку.
- * @param {Array} docs
- * @returns {string}
- */
-function flattenDocToCsv(docs) {
-    if (!Array.isArray(docs) || docs.length === 0) return '';
-    const fields = getAllKeys(docs);
-    const lines = [];
-    lines.push(fields.join(','));
-    for (const doc of docs) {
-        lines.push(fields.map(f => JSON.stringify(resolveNestedField(doc, f) ?? '')).join(','));
-    }
-    return lines.join('\n');
-}
-
-/**
- * Собирает все ключи из массива документов, включая вложенные.
- * @param {Array} docs
- * @returns {Array<string>}
- */
-function getAllKeys(docs) {
-    const keys = new Set();
-    for (const doc of docs) {
-        collectKeysRecursive(doc, '', keys);
-    }
-    return Array.from(keys);
-}
-
-/**
- * Рекурсивно собирает ключи (вложенные как path.a.b).
- * @param {Object} obj
- * @param {string} prefix
- * @param {Set<string>} keys
- */
-function collectKeysRecursive(obj, prefix, keys) {
-    if (typeof obj !== 'object' || obj === null) return;
-    for (const key of Object.keys(obj)) {
-        const pathKey = prefix ? `${prefix}.${key}` : key;
-        keys.add(pathKey);
-        if (typeof obj[key] === 'object' && obj[key] !== null && !Array.isArray(obj[key])) {
-            collectKeysRecursive(obj[key], pathKey, keys);
-        }
-    }
-}
-
-/**
- * Получает значение поля по вложенному пути (path.a.b).
- * @param {Object} obj
- * @param {string} path
- * @returns {*}
- */
-function resolveNestedField(obj, path) {
-    const parts = path.split('.');
-    let current = obj;
-    for (const part of parts) {
-        if (current && typeof current === 'object' && part in current) {
-            current = current[part];
-        } else {
-            return undefined;
-        }
-    }
-    return current;
-}
+// flattenDocToCsv перенесена в wise-json/collection/utils.js
 
 module.exports = {
     colorizeJson,
     escapeHtml,
-    flattenDocToCsv
+    // flattenDocToCsv - больше не экспортируется здесь, см. wise-json/collection/utils.js
 };

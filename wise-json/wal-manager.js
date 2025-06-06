@@ -1,3 +1,5 @@
+// wise-json/wal-manager.js
+
 const fs = require('fs/promises');
 const path = require('path');
 
@@ -37,7 +39,14 @@ async function initializeWal(walPath, collectionDirPath) {
  * @returns {Promise<void>}
  */
 async function appendWalEntry(walPath, entry) {
-    await fs.appendFile(walPath, JSON.stringify(entry) + '\n', 'utf8');
+    try {
+        await fs.appendFile(walPath, JSON.stringify(entry) + '\n', 'utf8');
+    } catch (err) {
+        // ASSUMPTION: Ошибка записи в WAL считается критической для crash-safe механики.
+        // TODO: Возможно стоит добавить retry-логику для appendFile в будущем.
+        console.error(`[WAL] Ошибка appendFile для WAL: ${err.message}`);
+        throw err;
+    }
 }
 
 /**
@@ -73,26 +82,31 @@ async function readWal(walPath, sinceTimestamp = null, options = {}) {
         }
     }
 
-    for (const line of lines) {
+    for (const [lineNum, line] of lines.entries()) {
         if (!line.trim()) continue;
         let entry;
         try {
             entry = JSON.parse(line);
         } catch (e) {
+            // ASSUMPTION: Повреждённая строка WAL пропускается.
+            // Если это критически важная запись (например, часть транзакционного блока), вся транзакция будет проигнорирована!
+            // Это допустимо для crash-safe embedded БД, но может привести к потере изменений этой транзакции.
+            // TODO: В будущем возможно реализовать режим strict/recover, который позволит либо останавливать восстановление, либо искать способ "починить" WAL.
             if (typeof options.onError === 'function') {
-                options.onError(e, line);
+                options.onError(e, line, lineNum);
             } else if (options.strict) {
-                throw new Error(`[WAL] Не удалось распарсить запись WAL: ${e.stack || e.message}`);
+                throw new Error(`[WAL] Не удалось распарсить запись WAL: ${e.stack || e.message}\nLine: ${lineNum}`);
             } else {
-                console.warn(`[WAL] ⚠ Не удалось распарсить запись WAL: ${e.stack || e.message}`);
+                console.warn(`[WAL] ⚠ Не удалось распарсить запись WAL: ${e.stack || e.message}\nLine: ${lineNum}`);
             }
             continue;
         }
 
         // Если это транзакционный блок
         if (entry.txn) {
+            // ASSUMPTION: Транзакция применяется только если в WAL есть и start, и commit, и все ops не повреждены.
             if (entry.txn === 'start') {
-                txnStates[entry.id] = { ops: [], committed: false };
+                txnStates[entry.id] = { ops: [], committed: false, startLine: lineNum };
             } else if (entry.txn === 'op') {
                 if (txnStates[entry.txid]) txnStates[entry.txid].ops.push(entry);
             } else if (entry.txn === 'commit') {
@@ -117,10 +131,12 @@ async function readWal(walPath, sinceTimestamp = null, options = {}) {
     // После чтения — добавить только завершённые транзакции
     for (const [txid, state] of Object.entries(txnStates)) {
         if (state.committed) {
+            // ASSUMPTION: Если хотя бы одна операция в транзакции была битой или не дошла до commit, транзакция игнорируется полностью.
             for (const op of state.ops) {
                 result.push({ ...op, _txn_applied: true });
             }
         }
+        // ASSUMPTION: Незавершённые (неcommitted) транзакции игнорируются для crash-safety.
     }
 
     if (sinceTimestamp) {
@@ -159,8 +175,14 @@ async function compactWal(walPath, sinceTimestamp = null) {
 
     // Перезаписываем WAL только с новыми (после чекпоинта) операциями
     const lines = filtered.map(e => JSON.stringify(e)).join('\n');
-    await fs.writeFile(walPath, lines.length ? lines + '\n' : '', 'utf8');
-    console.log(`[WAL] Компакция WAL завершена. Осталось ${filtered.length} записей.`);
+    try {
+        await fs.writeFile(walPath, lines.length ? lines + '\n' : '', 'utf8');
+        console.log(`[WAL] Компакция WAL завершена. Осталось ${filtered.length} записей.`);
+    } catch (err) {
+        // ASSUMPTION: Ошибка при компакции WAL — критична для корректности работы. Сообщаем об ошибке, не бросаем исключение.
+        // TODO: Подумать о rollback/retry при сбоях.
+        console.error(`[WAL] Ошибка при компакции WAL: ${err.message}`);
+    }
 }
 
 /**
@@ -186,7 +208,14 @@ async function writeTransactionBlock(walPath, txid, ops) {
     }
     block.push({ txn: 'commit', id: txid, ts: new Date().toISOString() });
     const text = block.map(e => JSON.stringify(e)).join('\n') + '\n';
-    await fs.appendFile(walPath, text, 'utf8');
+    try {
+        await fs.appendFile(walPath, text, 'utf8');
+    } catch (err) {
+        // ASSUMPTION: Ошибка при записи блока транзакции делает транзакцию несостоятельной — вызываем ошибку.
+        // TODO: Можно реализовать откат или повторную попытку.
+        console.error(`[WAL] Ошибка записи транзакционного блока: ${err.message}`);
+        throw err;
+    }
 }
 
 module.exports = {

@@ -9,7 +9,8 @@ const fs = require('fs');
 const path = require('path');
 const process = require('process');
 const WiseJSON = require('../wise-json/index.js');
-const { colorizeJson, escapeHtml, flattenDocToCsv } = require('./utils.js');
+const { colorizeJson, escapeHtml } = require('./utils.js'); // flattenDocToCsv перенесён
+const { flattenDocToCsv } = require('../wise-json/collection/utils.js'); // Новый импорт
 
 const args = process.argv.slice(2);
 
@@ -190,7 +191,6 @@ async function showCollection(db, params) {
     }
 }
 
-
 async function getDocument(db, params) {
     const [colName, docId] = params;
     if (!colName || !docId) {
@@ -233,7 +233,11 @@ async function exportCollection(db, params) {
     const col = await db.collection(colName);
     await col.initPromise;
     if (options.output === 'csv') {
-        await col.exportCsv(file);
+        // Используем flattenDocToCsv из ядра
+        const docs = await col.getAll();
+        const csv = flattenDocToCsv(docs);
+        fs.writeFileSync(file, csv, 'utf8');
+        console.log(`Exported to ${file}`);
     } else {
         await col.exportJson(file);
     }

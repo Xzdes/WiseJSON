@@ -19,6 +19,10 @@ const { initializeWal, readWal, getWalPath, compactWal } = require('../wal-manag
 const { loadLatestCheckpoint } = require('../checkpoint-manager.js');
 const { cleanupExpiredDocs, isAlive } = require('./ttl.js');
 
+/**
+ * Коллекция WiseJSON.
+ * @class
+ */
 class Collection {
     constructor(name, dbRootPath, options = {}) {
         if (!isNonEmptyString(name)) {
@@ -83,8 +87,10 @@ class Collection {
         );
 
         if (loaded && loaded.documents && loaded.documents.size > 0) {
+            // TODO: Перевести console.log на кастомный логгер через options.logger
             console.log(`[WiseJSON] ✅ Checkpoint loaded: ${loaded.documents.size} documents (collection: ${this.name})`);
         } else {
+            // TODO: Перевести console.warn на кастомный логгер через options.logger
             console.warn(`[WiseJSON] ⚠ No checkpoint found for collection: ${this.name}`);
         }
 
@@ -98,12 +104,14 @@ class Collection {
                     unique: indexMeta.type === 'unique',
                 });
             } catch (e) {
+                // TODO: Перевести console.warn на кастомный логгер через options.logger
                 console.warn(`[WiseJSON] ⚠ Failed to restore index '${indexMeta.fieldName}': ${e.message}`);
             }
         }
 
         const walEntries = await readWal(this.walPath, loaded.timestamp);
         if (walEntries.length > 0) {
+            // TODO: Перевести console.log на кастомный логгер через options.logger
             console.log(`[WiseJSON] 📝 Applying ${walEntries.length} WAL entries for collection: ${this.name}`);
         }
         for (const entry of walEntries) {
@@ -124,6 +132,7 @@ class Collection {
         this._ttlCleanupTimer = setInterval(() => {
             const removed = cleanupExpiredDocs(this.documents, this._indexManager);
             if (removed > 0) {
+                // TODO: Перевести console.log на кастомный логгер через options.logger
                 console.log(`[WiseJSON] [TTL] Auto-cleanup: удалено ${removed} документов (collection: ${this.name})`);
             }
         }, this._ttlCleanupIntervalMs);
@@ -135,6 +144,14 @@ class Collection {
             this._ttlCleanupTimer = null;
         }
     }
+
+    /**
+     * Последовательная очередь записи.
+     * ASSUMPTION: Все операции записи сериализуются через _writeQueue и выполняются только по одной.
+     * Это гарантирует отсутствие race conditions и согласованность данных для single-process mode.
+     * При работе нескольких процессов/инстансов одновременная запись не поддерживается (может привести к порче данных).
+     * Для поддержки многопроцессной архитектуры потребуется другая схема синхронизации.
+     */
     async _enqueue(opFn) {
         return new Promise((resolve, reject) => {
             this._writeQueue.push({ opFn, resolve, reject });
@@ -143,6 +160,7 @@ class Collection {
     }
 
     async _processQueue() {
+        // ASSUMPTION: Одновременная обработка только одной записи из очереди.
         if (this._writing || this._writeQueue.length === 0) return;
         this._writing = true;
         const task = this._writeQueue.shift();
@@ -169,6 +187,7 @@ class Collection {
                 (_, inserted) => inserted
             );
             this._stats.inserts++;
+            // TODO: Перевести console.log на кастомный логгер через options.logger
             console.log(`[WiseJSON] Inserted document with _id: ${_id} in collection: ${this.name}`);
             return result;
         });
@@ -190,6 +209,7 @@ class Collection {
                 (_, inserted) => inserted
             );
             this._stats.inserts += prepared.length;
+            // TODO: Перевести console.log на кастомный логгер через options.logger
             console.log(`[WiseJSON] Inserted ${prepared.length} documents in collection: ${this.name}`);
             return prepared;
         });
@@ -211,6 +231,7 @@ class Collection {
                 { id }
             );
             this._stats.updates++;
+            // TODO: Перевести console.log на кастомный логгер через options.logger
             console.log(`[WiseJSON] Updated document with _id: ${id} in collection: ${this.name}`);
             return result;
         });
@@ -241,6 +262,7 @@ class Collection {
                 { id }
             );
             this._stats.removes++;
+            // TODO: Перевести console.log на кастомный логгер через options.logger
             console.log(`[WiseJSON] Removed document with _id: ${id} in collection: ${this.name}`);
             return result;
         });
@@ -256,6 +278,7 @@ class Collection {
             this.documents.clear();
             this._indexManager.clearAllData();
             this._stats.clears++;
+            // TODO: Перевести console.log на кастомный логгер через options.logger
             console.log(`[WiseJSON] Cleared all documents in collection: ${this.name}`);
             return result;
         });
@@ -291,11 +314,13 @@ class Collection {
     async createIndex(fieldName, options) {
         this._indexManager.createIndex(fieldName, options);
         this._indexManager.rebuildIndexesFromData(this.documents);
+        // TODO: Перевести console.log на кастомный логгер через options.logger
         console.log(`[WiseJSON] Created index on field '${fieldName}' (collection: ${this.name})`);
     }
 
     async dropIndex(fieldName) {
         this._indexManager.dropIndex(fieldName);
+        // TODO: Перевести console.log на кастомный логгер через options.logger
         console.log(`[WiseJSON] Dropped index on field '${fieldName}' (collection: ${this.name})`);
     }
 
@@ -323,6 +348,13 @@ class Collection {
         const results = await this.findByIndexedValue(fieldName, value);
         return results.length > 0 ? results[0] : null;
     }
+
+    /**
+     * Экспорт коллекции в JSON-файл.
+     * @param {string} filePath
+     * @param {object} options
+     * @returns {Promise<void>}
+     */
     async exportJson(filePath, options = {}) {
         const docs = await this.getAll();
         const stream = createWriteStream(filePath, { encoding: 'utf8' });
@@ -336,22 +368,31 @@ class Collection {
         }
         stream.write(']');
         stream.end();
+        // TODO: Перевести console.log на кастомный логгер через options.logger
         console.log(`[WiseJSON] Exported ${docs.length} documents to ${filePath}`);
     }
 
+    /**
+     * Экспорт коллекции в CSV-файл.
+     * FIXME: Зависимость от explorer/utils.js (flattenDocToCsv). Лучше перенести функцию в ядро или общий utils.
+     * @param {string} filePath
+     * @returns {Promise<void>}
+     */
     async exportCsv(filePath) {
-    const { flattenDocToCsv } = require('../../explorer/utils.js');
-    const docs = await this.getAll();
-    if (docs.length === 0) {
-        await fs.writeFile(filePath, '', 'utf8');
-        console.log(`[WiseJSON] No documents to export in CSV.`);
-        return;
+        // FIXME: Зависимость на explorer/utils.js, нужно перенести flattenDocToCsv в ядро
+        const { flattenDocToCsv } = require('../../explorer/utils.js');
+        const docs = await this.getAll();
+        if (docs.length === 0) {
+            await fs.writeFile(filePath, '', 'utf8');
+            // TODO: Перевести console.log на кастомный логгер через options.logger
+            console.log(`[WiseJSON] No documents to export in CSV.`);
+            return;
+        }
+        const csv = flattenDocToCsv(docs);
+        await fs.writeFile(filePath, csv, 'utf8');
+        // TODO: Перевести console.log на кастомный логгер через options.logger
+        console.log(`[WiseJSON] Exported ${docs.length} documents to ${filePath} (CSV)`);
     }
-    const csv = flattenDocToCsv(docs);
-    await fs.writeFile(filePath, csv, 'utf8');
-    console.log(`[WiseJSON] Exported ${docs.length} documents to ${filePath} (CSV)`);
-}
-
 
     async importJson(filePath, options = {}) {
         const mode = options.mode || 'append';
@@ -363,6 +404,7 @@ class Collection {
             await this.clear();
         }
         await this.insertMany(data);
+        // TODO: Перевести console.log на кастомный логгер через options.logger
         console.log(`[WiseJSON] Imported ${data.length} documents from ${filePath} (mode: ${mode})`);
     }
 
@@ -383,6 +425,7 @@ class Collection {
         }
         this._lastCheckpointTimestamp = lastCheckpointTimestamp || new Date().toISOString();
         await compactWal(this.walPath, this._lastCheckpointTimestamp);
+        // TODO: Перевести console.log на кастомный логгер через options.logger
         console.log(`[WiseJSON] Saved checkpoint for collection: ${this.name}`);
         return checkpointResult;
     }
@@ -391,6 +434,7 @@ class Collection {
         this._checkpoint.stopCheckpointTimer();
         this._stopTtlCleanupTimer();
         await this.flushToDisk();
+        // TODO: Перевести console.log на кастомный логгер через options.logger
         console.log(`[WiseJSON] Closed collection: ${this.name} (checkpoint saved)`);
     }
 

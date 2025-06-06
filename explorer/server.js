@@ -51,7 +51,8 @@ async function startServer() {
             await col.initPromise;
             let docs = await col.getAll();
 
-            // Фильтрация: filter_<field>=value
+            // Фильтрация: filter_<field>=value (WARNING: только equals, небезопасно для сложных данных)
+            // TODO: Расширить синтаксис фильтрации (например, filter_<field>__gt, __lt и др.)
             for (const [key, value] of Object.entries(query)) {
                 if (key.startsWith('filter_')) {
                     const field = key.slice(7);
@@ -73,7 +74,6 @@ async function startServer() {
                     return 0;
                 });
             }
-console.log('DEBUG: docs.length before slice:', docs.length);
             // Пагинация
             const offset = parseInt(query.offset || '0', 10);
             const limit = parseInt(query.limit || '10', 10);
@@ -113,12 +113,18 @@ console.log('DEBUG: docs.length before slice:', docs.length);
             return;
         }
 
+        // WARNING: Безопасность
+        // Внимание: Встроенный сервер Data Explorer НЕ содержит никакой аутентификации/авторизации.
+        // Используйте только в закрытых, доверенных локальных сетях/на локальной машине.
+        // TODO: Если потребуется для production, добавить слой auth (например, по токену/логину).
+
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Not found' }));
     });
 
     server.listen(PORT, () => {
         console.log(`WiseJSON Data Explorer running at http://127.0.0.1:${PORT}/`);
+        // WARNING: Эксплорер открыт без авторизации! Не используйте в публичных сетях!
     });
 }
 
