@@ -14,7 +14,6 @@
 
 * **High Performance:** Fast read and write operations.
 * **Crash-Proof & Durable:**
-
   * **WAL (Write-Ahead Logging):** All changes are first written to a log for data recovery after crashes.
   * **Checkpoints:** Periodic snapshots for quick recovery.
   * **Segmented Checkpoints:** For better performance on large collections.
@@ -26,12 +25,32 @@
 * **Embedded & File-Based:** Stores data locally without a separate server.
 * **Simple API:** Intuitive work with collections and documents.
 * **Tooling:**
-
   * **Basic CLI (`wise-json`):** For core DB operations.
   * **Data Explorer (web interface & advanced CLI `wisejson-explorer`).**
-* **Lightweight:** Minimal dependencies (only `uuid`).
+* **Lightweight:** Minimal dependencies (only `uuid`, `proper-lockfile`).
 * **Graceful Shutdown:** Automatic data saving on proper application termination.
 * **Custom ID Generator:** Allows you to set your own `_id` function.
+
+---
+
+## 📦 Dependencies
+
+WiseJSON DB uses only two runtime dependencies:
+
+- [`uuid`](https://www.npmjs.com/package/uuid) — for generating unique IDs
+- [`proper-lockfile`](https://www.npmjs.com/package/proper-lockfile) — for safe file locking and multi-process protection
+
+Both are installed automatically with:
+
+```bash
+npm install wise-json-db
+````
+
+If you use a custom build system or bundle WiseJSON separately, ensure these packages are installed:
+
+```bash
+npm install uuid proper-lockfile
+```
 
 ---
 
@@ -222,6 +241,7 @@ const db = new WiseJSON('/path/to/db', {
 ## 🔒 Durability and Fault Tolerance
 
 WiseJSON DB uses WAL and checkpoints for data safety. WAL ensures recovery after crashes, while checkpoints capture the database state. Data is written atomically using temporary files.
+**Safe multi-process operation is ensured by [proper-lockfile](https://www.npmjs.com/package/proper-lockfile).**
 
 ---
 
