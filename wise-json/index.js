@@ -1,3 +1,5 @@
+// wise-json/index.js
+
 const path = require('path');
 const Collection = require('./collection/core.js');
 const TransactionManager = require('./collection/transaction-manager.js');
@@ -29,11 +31,23 @@ class WiseJSON {
         return this.collections[name];
     }
 
+    /**
+     * Возвращает имена коллекций (все подпапки кроме служебных).
+     * @returns {Promise<string[]>}
+     */
     async getCollectionNames() {
         const fs = require('fs/promises');
         try {
             const dirs = await fs.readdir(this.dbRootPath, { withFileTypes: true });
-            return dirs.filter(d => d.isDirectory()).map(d => d.name);
+            return dirs
+                .filter(
+                    d =>
+                        d.isDirectory() &&
+                        !d.name.startsWith('.') &&
+                        d.name !== '_checkpoints' &&
+                        d.name !== 'node_modules'
+                )
+                .map(d => d.name);
         } catch (e) {
             return [];
         }

@@ -19,7 +19,23 @@ async function getCheckpointFiles(checkpointsDir, collectionName, type = 'meta')
 }
 
 /**
- * Загружает последний чекпоинт (meta + data) для коллекции.
+ * Возвращает последний timestamp чекпоинта (общий для meta и data сегментов).
+ * @param {string[]} metaFiles
+ * @param {string[]} dataFiles
+ * @returns {string|null}
+ */
+function getLastCheckpointTimestamp(metaFiles, dataFiles, collectionName) {
+    // Берём последний meta файл
+    if (!metaFiles.length || !dataFiles.length) return null;
+    // Пример: checkpoint_meta_users_2025-06-07T08-21-10-654Z.json
+    const lastMeta = metaFiles[metaFiles.length - 1];
+    const re = new RegExp(`^checkpoint_meta_${collectionName}_(.+)\\.json$`);
+    const match = lastMeta.match(re);
+    return match ? match[1] : null;
+}
+
+/**
+ * Загружает последний чекпоинт (meta + все data-сегменты) для коллекции.
  * Возвращает { documents: Map, indexesMeta, timestamp }
  */
 async function loadLatestCheckpoint(checkpointsDir, collectionName) {
@@ -29,17 +45,25 @@ async function loadLatestCheckpoint(checkpointsDir, collectionName) {
         return { documents: new Map(), indexesMeta: [], timestamp: null };
     }
 
-    // Берём последний (он самый свежий)
-    const metaFile = metaFiles[metaFiles.length - 1];
-    const dataFile = dataFiles[dataFiles.length - 1];
+    // Берём последний общий timestamp
+    const timestamp = getLastCheckpointTimestamp(metaFiles, dataFiles, collectionName);
+    if (!timestamp) {
+        return { documents: new Map(), indexesMeta: [], timestamp: null };
+    }
 
-    let meta, docsArr;
+    // Файлы meta и data сегментов для этого timestamp
+    const metaFile = `checkpoint_meta_${collectionName}_${timestamp}.json`;
+    // Все data-сегменты:
+    const dataSegmentFiles = dataFiles.filter(f =>
+        f.startsWith(`checkpoint_data_${collectionName}_${timestamp}_seg`)
+    );
+
+    let meta, docsArr = [];
 
     // META
     try {
         meta = JSON.parse(await fs.readFile(path.join(checkpointsDir, metaFile), 'utf8'));
     } catch (e) {
-        // Если файл есть, но не читается (битый) — предупреждение!
         const fullPath = path.join(checkpointsDir, metaFile);
         try {
             await fs.access(fullPath);
@@ -50,18 +74,20 @@ async function loadLatestCheckpoint(checkpointsDir, collectionName) {
         meta = { indexesMeta: [], timestamp: null };
     }
 
-    // DATA
-    try {
-        docsArr = JSON.parse(await fs.readFile(path.join(checkpointsDir, dataFile), 'utf8'));
-    } catch (e) {
-        const fullPath = path.join(checkpointsDir, dataFile);
+    // DATA: Склеиваем все сегменты!
+    for (const segFile of dataSegmentFiles) {
         try {
-            await fs.access(fullPath);
-            console.warn(`[Checkpoint] ⚠ Ошибка чтения data-чекпоинта (битый файл): ${fullPath}\n${e.stack || e.message}`);
-        } catch {
-            // Если файла нет — тишина
+            const arr = JSON.parse(await fs.readFile(path.join(checkpointsDir, segFile), 'utf8'));
+            if (Array.isArray(arr)) docsArr.push(...arr);
+        } catch (e) {
+            const fullPath = path.join(checkpointsDir, segFile);
+            try {
+                await fs.access(fullPath);
+                console.warn(`[Checkpoint] ⚠ Ошибка чтения data-сегмента (битый файл): ${fullPath}\n${e.stack || e.message}`);
+            } catch {
+                // Если файла нет — тишина
+            }
         }
-        docsArr = [];
     }
 
     // Восстанавливаем batch'ами (вся коллекция в одном массиве)
@@ -76,8 +102,8 @@ async function loadLatestCheckpoint(checkpointsDir, collectionName) {
     cleanupExpiredDocs(documents);
 
     // Явное логгирование для дебага
-    if (metaFile && dataFile) {
-        console.log(`[Checkpoint] Загружен checkpoint: meta: ${metaFile}, data: ${dataFile} (docs: ${documents.size})`);
+    if (metaFile && dataSegmentFiles.length) {
+        console.log(`[Checkpoint] Загружен checkpoint: meta: ${metaFile}, data-сегментов: ${dataSegmentFiles.length} (docs: ${documents.size})`);
     } else {
         console.warn(`[Checkpoint] Checkpoint files не найдены для коллекции: ${collectionName}`);
     }
@@ -105,8 +131,20 @@ async function cleanupOldCheckpoints(checkpointsDir, collectionName, keep = 5) {
             }
         }
     }
-    if (dataFiles.length > keep) {
-        const toRemove = dataFiles.slice(0, dataFiles.length - keep);
+    // data-сегментов на каждый чекпоинт может быть много!
+    if (dataFiles.length > keep * 2) {
+        // Оставляем только те сегменты, чей timestamp среди последних keep чекпоинтов
+        const keepTimestamps = new Set(
+            metaFiles.slice(-keep).map(f => {
+                const re = new RegExp(`^checkpoint_meta_${collectionName}_(.+)\\.json$`);
+                const match = f.match(re);
+                return match ? match[1] : null;
+            }).filter(Boolean)
+        );
+        const toRemove = dataFiles.filter(f => {
+            const m = f.match(new RegExp(`^checkpoint_data_${collectionName}_(.+)_seg\\d+\\.json$`));
+            return !(m && keepTimestamps.has(m[1]));
+        });
         for (const f of toRemove) {
             try {
                 await fs.unlink(path.join(checkpointsDir, f));

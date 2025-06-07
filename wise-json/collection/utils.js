@@ -1,187 +1,79 @@
-const { v4: uuidv4 } = require('uuid');
-const path = require('path');
+/**
+ * wise-json/collection/utils.js
+ * Утилиты для работы с коллекциями WiseJSON (id, типы, сериализация и др.)
+ */
 
 /**
- * Генератор уникальных идентификаторов по умолчанию.
+ * Генерирует уникальный id (короткий, простой).
  * @returns {string}
  */
 function defaultIdGenerator() {
-    return uuidv4();
+    return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
 /**
- * Проверяет, что строка не пустая.
- * @param {any} s
+ * Проверяет, является ли значение непустой строкой.
+ * @param {any} value
  * @returns {boolean}
  */
-function isNonEmptyString(s) {
-    return typeof s === 'string' && !!s.length;
+function isNonEmptyString(value) {
+    return typeof value === 'string' && value.length > 0;
 }
 
 /**
- * Проверяет, что объект — plain object (а не массив, не null, не функция и т.п.)
- * @param {any} obj
+ * Проверяет, является ли значение plain-объектом (без прототипа).
+ * @param {any} value
  * @returns {boolean}
  */
-function isPlainObject(obj) {
-    return obj !== null && typeof obj === 'object' && !Array.isArray(obj);
+function isPlainObject(value) {
+    return Object.prototype.toString.call(value) === '[object Object]';
 }
 
 /**
- * Проверяет, что передан массив объектов.
- * @param {any} arr
- * @returns {boolean}
- */
-function isArrayOfObjects(arr) {
-    return Array.isArray(arr) && arr.every(isPlainObject);
-}
-
-/**
- * Возвращает текущее время в ISO-строке (UTC).
- * @returns {string}
- */
-function nowIsoString() {
-    return new Date().toISOString();
-}
-
-/**
- * Помощник: преобразует массив документов в Map по _id.
- * @param {Array} docs
- * @returns {Map}
- */
-function docsArrayToMap(docs) {
-    const map = new Map();
-    for (const doc of docs) {
-        if (doc && doc._id) {
-            map.set(doc._id, doc);
-        }
-    }
-    return map;
-}
-
-/**
- * Batch helper — преобразует массив batch-операций WAL в массив документов.
- * @param {Array} walEntries
- * @returns {Array} docs
- */
-function collectDocsFromWalBatch(walEntries) {
-    const docs = [];
-    for (const entry of walEntries) {
-        if (entry.op === 'INSERT' && entry.doc) {
-            docs.push(entry.doc);
-        } else if (entry.op === 'BATCH_INSERT' && Array.isArray(entry.docs)) {
-            docs.push(...entry.docs);
-        }
-    }
-    return docs;
-}
-
-/**
- * Делает путь абсолютным (если не абсолютный).
+ * Делает абсолютный путь (удобно для базы)
  * @param {string} p
  * @returns {string}
  */
 function makeAbsolutePath(p) {
-    if (!p) return path.resolve(process.cwd());
-    return path.isAbsolute(p) ? p : path.resolve(process.cwd(), p);
+    return require('path').isAbsolute(p) ? p : require('path').resolve(process.cwd(), p);
 }
 
 /**
- * Валидатор options для коллекции/базы.
- * @param {object} options
+ * Валидирует/дополняет опции коллекции.
+ * @param {object} [opts]
  * @returns {object}
  */
-function validateOptions(options) {
-    const valid = isPlainObject(options) ? { ...options } : {};
-    // ttlCleanupIntervalMs — только число > 0
-    if (valid.ttlCleanupIntervalMs !== undefined) {
-        if (
-            typeof valid.ttlCleanupIntervalMs !== 'number' ||
-            isNaN(valid.ttlCleanupIntervalMs) ||
-            valid.ttlCleanupIntervalMs <= 0
-        ) {
-            console.warn('[WiseJSON] options.ttlCleanupIntervalMs должно быть положительным числом, использую 60000');
-            valid.ttlCleanupIntervalMs = 60000;
-        }
-    }
-    // Добавлять другие опции по мере необходимости!
-    return valid;
+function validateOptions(opts = {}) {
+    return Object.assign({
+        maxSegmentSizeBytes: 2 * 1024 * 1024,
+        checkpointIntervalMs: 60000,
+        ttlCleanupIntervalMs: 60000,
+        walSync: false
+    }, opts || {});
 }
 
 /**
- * flattenDocToCsv перенесена из explorer/utils.js, теперь это часть ядра.
  * Преобразует массив документов в CSV-строку.
- * @param {Array} docs
+ * @param {Array<Object>} docs
  * @returns {string}
  */
 function flattenDocToCsv(docs) {
     if (!Array.isArray(docs) || docs.length === 0) return '';
-    const fields = getAllKeys(docs);
-    const lines = [];
-    lines.push(fields.join(','));
-    for (const doc of docs) {
-        lines.push(fields.map(f => JSON.stringify(resolveNestedField(doc, f) ?? '')).join(','));
-    }
-    return lines.join('\n');
-}
-
-/**
- * Собирает все ключи из массива документов, включая вложенные.
- * @param {Array} docs
- * @returns {Array<string>}
- */
-function getAllKeys(docs) {
-    const keys = new Set();
-    for (const doc of docs) {
-        collectKeysRecursive(doc, '', keys);
-    }
-    return Array.from(keys);
-}
-
-/**
- * Рекурсивно собирает ключи (вложенные как path.a.b).
- * @param {Object} obj
- * @param {string} prefix
- * @param {Set<string>} keys
- */
-function collectKeysRecursive(obj, prefix, keys) {
-    if (typeof obj !== 'object' || obj === null) return;
-    for (const key of Object.keys(obj)) {
-        const pathKey = prefix ? `${prefix}.${key}` : key;
-        keys.add(pathKey);
-        if (typeof obj[key] === 'object' && obj[key] !== null && !Array.isArray(obj[key])) {
-            collectKeysRecursive(obj[key], pathKey, keys);
-        }
-    }
-}
-
-/**
- * Получает значение поля по вложенному пути (path.a.b).
- * @param {Object} obj
- * @param {string} path
- * @returns {*}
- */
-function resolveNestedField(obj, path) {
-    const parts = path.split('.');
-    let current = obj;
-    for (const part of parts) {
-        if (current && typeof current === 'object' && part in current) {
-            current = current[part];
-        } else {
-            return undefined;
-        }
-    }
-    return current;
+    const fields = Array.from(new Set(docs.flatMap(doc => Object.keys(doc))));
+    const escape = v => (typeof v === 'string' && (v.includes(',') || v.includes('"') || v.includes('\n')))
+        ? `"${String(v).replace(/"/g, '""')}"`
+        : v;
+    const csv = [
+        fields.join(','),
+        ...docs.map(doc => fields.map(f => escape(doc[f] ?? '')).join(','))
+    ];
+    return csv.join('\n');
 }
 
 module.exports = {
     defaultIdGenerator,
     isNonEmptyString,
     isPlainObject,
-    isArrayOfObjects,
-    nowIsoString,
-    docsArrayToMap,
-    collectDocsFromWalBatch,
     makeAbsolutePath,
     validateOptions,
     flattenDocToCsv

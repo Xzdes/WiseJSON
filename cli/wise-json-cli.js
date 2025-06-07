@@ -4,6 +4,77 @@ const fs = require('fs/promises');
 const path = require('path');
 const WiseJSON = require('../wise-json/index.js');
 
+/**
+ * Проверяет документ на соответствие фильтру с поддержкой операторов ($gt, $lt, $in, $regex и т.д.)
+ * @param {object} doc
+ * @param {object} filter
+ * @returns {boolean}
+ */
+function matchFilter(doc, filter) {
+    if (typeof filter !== 'object' || filter == null) return false;
+
+    // Логика $or/$and на верхнем уровне фильтра
+    if (Array.isArray(filter.$or)) {
+        return filter.$or.some(f => matchFilter(doc, f));
+    }
+    if (Array.isArray(filter.$and)) {
+        return filter.$and.every(f => matchFilter(doc, f));
+    }
+
+    // По всем полям фильтра
+    for (const key of Object.keys(filter)) {
+        if (key === '$or' || key === '$and') continue;
+        const cond = filter[key];
+        const value = doc[key];
+
+        if (typeof cond === 'object' && cond !== null && !Array.isArray(cond)) {
+            // Операторы
+            for (const op of Object.keys(cond)) {
+                const opVal = cond[op];
+                switch (op) {
+                    case '$gt':
+                        if (!(value > opVal)) return false;
+                        break;
+                    case '$gte':
+                        if (!(value >= opVal)) return false;
+                        break;
+                    case '$lt':
+                        if (!(value < opVal)) return false;
+                        break;
+                    case '$lte':
+                        if (!(value <= opVal)) return false;
+                        break;
+                    case '$ne':
+                        if (value === opVal) return false;
+                        break;
+                    case '$in':
+                        if (!Array.isArray(opVal) || !opVal.includes(value)) return false;
+                        break;
+                    case '$nin':
+                        if (Array.isArray(opVal) && opVal.includes(value)) return false;
+                        break;
+                    case '$regex':
+                        {
+                            let re = opVal;
+                            if (typeof re === 'string') {
+                                re = new RegExp(re, cond.$options || '');
+                            }
+                            if (typeof value !== 'string' || !re.test(value)) return false;
+                        }
+                        break;
+                    default:
+                        // Неизвестный оператор: игнорируем (или можно throw)
+                        return false;
+                }
+            }
+        } else {
+            // Прямое сравнение (равенство)
+            if (value !== cond) return false;
+        }
+    }
+    return true;
+}
+
 const DB_PATH = process.env.WISE_JSON_PATH || path.resolve(process.cwd(), 'wise-json-db-data');
 
 const LANG = (
@@ -27,9 +98,9 @@ wise-json-cli <команда> [опции]
     insert-many <collection> <file.json> [--ttl <ms>]
         - Вставить пакет документов из файла (массив JSON)
         - Опционально: TTL (время жизни, мс)
-    find <collection> [query] [--unsafe-eval]
-        - Найти документы (query — или JS-функция-предикат как строка, или JSON-фильтр)
-        - Для eval-предиката требуется флаг --unsafe-eval!
+    find <collection> [filter]
+        - Найти документы (filter — JSON-объект с поддержкой операторов: $gt, $lt, $in, $regex, $or, $and)
+        - Пример: '{"age":{"$gt":30}}' или '{"$or":[{"city":"Moscow"},{"age":{"$lt":18}}]}'
     get <collection> <id>
         - Получить документ по id
     remove <collection> <id>
@@ -61,9 +132,9 @@ wise-json-cli <command> [options]
     insert-many <collection> <file.json> [--ttl <ms>]
         - Batch insert documents from a file (JSON array)
         - Optional: TTL (time to live, ms)
-    find <collection> [query] [--unsafe-eval]
-        - Find documents (query is either a JS predicate function string, or a JSON filter object)
-        - For eval-predicate, --unsafe-eval flag is required!
+    find <collection> [filter]
+        - Find documents (filter is a JSON object supporting: $gt, $lt, $in, $regex, $or, $and)
+        - Example: '{"age":{"$gt":30}}' or '{"$or":[{"city":"Moscow"},{"age":{"$lt":18}}]}'
     get <collection> <id>
         - Get document by id
     remove <collection> <id>
@@ -93,8 +164,7 @@ function prettyError(msg, code = 1) {
 
 async function main() {
     const args = process.argv.slice(2).filter(x => !x.startsWith('--lang='));
-    const UNSAFE_EVAL = args.includes('--unsafe-eval');
-    const cleanArgs = args.filter(a => a !== '--unsafe-eval');
+    const cleanArgs = args;
 
     if (cleanArgs.length === 0 || cleanArgs[0] === 'help' || cleanArgs[0] === '--help') {
         printHelp();
@@ -178,7 +248,7 @@ async function main() {
         process.exit(0);
     }
 
-    // --- find (safe: поддержка JSON-фильтра + eval только по флагу)
+    // --- find (расширенный JSON-фильтр)
     if (command === 'find' && cleanArgs[1]) {
         const db = new WiseJSON(DB_PATH);
         await db.init();
@@ -186,39 +256,18 @@ async function main() {
         await collection.initPromise;
 
         let docs;
-        // WARNING: Использование eval с пользовательским вводом может быть ОПАСНО для безопасности!
-        // Даже с флагом --unsafe-eval это потенциально уязвимая функциональность (RCE).
-        // TODO: В будущем расширить безопасный синтаксис фильтров через JSON ($gt, $lt, $in, $regex и т.п.) и отказаться от eval.
-        // Оставляем возможность через явный флаг для продвинутых пользователей.
-        if (cleanArgs[2] && UNSAFE_EVAL) {
-            try {
-                // Предупреждение!
-                console.warn('\x1b[33m%s\x1b[0m',
-                    LANG === 'ru'
-                        ? '[ВНИМАНИЕ] Использование eval-фильтра может быть ОПАСНО! Не используйте с непроверенными данными.'
-                        : '[WARNING] Using eval-predicate may be UNSAFE! Do not use with untrusted data.'
-                );
-                // eslint-disable-next-line no-eval
-                const queryFn = eval(`(${cleanArgs[2]})`);
-                docs = await collection.find(queryFn);
-            } catch (e) {
-                prettyError(LANG === 'ru' ? 'Ошибка в функции фильтра (eval)' : 'Filter function (eval) error');
-            }
-        } else if (cleanArgs[2]) {
-            // Попробуем как JSON-фильтр (простой поиск по полям)
+        if (cleanArgs[2]) {
             let filter;
             try {
                 filter = JSON.parse(cleanArgs[2]);
             } catch (e) {
                 prettyError(
                     LANG === 'ru'
-                        ? 'Ошибка парсинга фильтра. Для произвольных JS-фильтров используйте --unsafe-eval.'
-                        : 'Filter parse error. For arbitrary JS filter use --unsafe-eval.'
+                        ? 'Ошибка парсинга фильтра (ожидается JSON-объект).'
+                        : 'Filter parse error (expecting JSON object).'
                 );
             }
-            docs = await collection.find(doc =>
-                Object.entries(filter).every(([k, v]) => doc[k] === v)
-            );
+            docs = await collection.find(doc => matchFilter(doc, filter));
         } else {
             docs = await collection.find(() => true);
         }

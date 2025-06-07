@@ -11,12 +11,128 @@ const WiseJSON = require('../wise-json/index.js');
 
 const PORT = process.env.PORT || 3000;
 const DB_PATH = process.env.WISE_JSON_PATH || path.resolve(process.cwd(), 'wise-json-db-data');
+
+console.log('[server.js] DB_PATH used:', DB_PATH);
+
 const db = new WiseJSON(DB_PATH);
+
+// --- AUTH (Basic) ---
+const AUTH_USER = process.env.WISEJSON_AUTH_USER;
+const AUTH_PASS = process.env.WISEJSON_AUTH_PASS;
+const useAuth = !!(AUTH_USER && AUTH_PASS);
+
+function parseBasicAuth(header) {
+    if (!header || !header.startsWith('Basic ')) return null;
+    const b64 = header.slice('Basic '.length).trim();
+    try {
+        const str = Buffer.from(b64, 'base64').toString('utf8');
+        const [user, pass] = str.split(':');
+        return { user, pass };
+    } catch {
+        return null;
+    }
+}
+
+function checkAuth(req, res) {
+    if (!useAuth) return true;
+    const auth = req.headers['authorization'];
+    const creds = parseBasicAuth(auth);
+    if (!creds || creds.user !== AUTH_USER || creds.pass !== AUTH_PASS) {
+        res.writeHead(401, {
+            'WWW-Authenticate': 'Basic realm="WiseJSON Data Explorer"',
+            'Content-Type': 'text/plain'
+        });
+        res.end('401 Unauthorized');
+        return false;
+    }
+    return true;
+}
+
+// --- FILTERS (как раньше, для REST API) ---
+function parseFilterFromQuery(query) {
+    const filter = {};
+    for (const [key, value] of Object.entries(query)) {
+        if (key.startsWith('filter_')) {
+            const tail = key.slice('filter_'.length);
+            const [field, ...ops] = tail.split('__');
+            if (!field) continue;
+            let v = value;
+            if (/^-?\d+(\.\d+)?$/.test(v)) v = parseFloat(v);
+            if (ops.length === 0) {
+                filter[field] = v;
+            } else {
+                const op = '__' + ops.join('__');
+                if (!filter[field]) filter[field] = {};
+                switch (op) {
+                    case '__gt': filter[field]['$gt'] = v; break;
+                    case '__lt': filter[field]['$lt'] = v; break;
+                    case '__gte': filter[field]['$gte'] = v; break;
+                    case '__lte': filter[field]['$lte'] = v; break;
+                    case '__ne': filter[field]['$ne'] = v; break;
+                    case '__in':
+                        filter[field]['$in'] = typeof v === 'string' ? v.split(',') : v;
+                        break;
+                    case '__nin':
+                        filter[field]['$nin'] = typeof v === 'string' ? v.split(',') : v;
+                        break;
+                    case '__regex':
+                        filter[field]['$regex'] = v;
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+    }
+    return filter;
+}
+
+function matchFilter(doc, filter) {
+    if (typeof filter !== 'object' || filter == null) return false;
+    if (Array.isArray(filter.$or)) {
+        return filter.$or.some(f => matchFilter(doc, f));
+    }
+    if (Array.isArray(filter.$and)) {
+        return filter.$and.every(f => matchFilter(doc, f));
+    }
+    for (const key of Object.keys(filter)) {
+        if (key === '$or' || key === '$and') continue;
+        const cond = filter[key];
+        const value = doc[key];
+        if (typeof cond === 'object' && cond !== null && !Array.isArray(cond)) {
+            for (const op of Object.keys(cond)) {
+                const opVal = cond[op];
+                switch (op) {
+                    case '$gt': if (!(value > opVal)) return false; break;
+                    case '$gte': if (!(value >= opVal)) return false; break;
+                    case '$lt': if (!(value < opVal)) return false; break;
+                    case '$lte': if (!(value <= opVal)) return false; break;
+                    case '$ne': if (value === opVal) return false; break;
+                    case '$in': if (!Array.isArray(opVal) || !opVal.includes(value)) return false; break;
+                    case '$nin': if (Array.isArray(opVal) && opVal.includes(value)) return false; break;
+                    case '$regex': {
+                        let re = opVal;
+                        if (typeof re === 'string') re = new RegExp(re, cond.$options || '');
+                        if (typeof value !== 'string' || !re.test(value)) return false;
+                        break;
+                    }
+                    default: return false;
+                }
+            }
+        } else {
+            if (value !== cond) return false;
+        }
+    }
+    return true;
+}
 
 async function startServer() {
     await db.init();
 
     const server = http.createServer(async (req, res) => {
+        // AUTH CHECK (до любого запроса)
+        if (!checkAuth(req, res)) return;
+
         const parsedUrl = url.parse(req.url, true);
         const pathname = parsedUrl.pathname;
         const query = parsedUrl.query;
@@ -39,6 +155,8 @@ async function startServer() {
                 const count = await col.count();
                 result.push({ name, count });
             }
+            // ЯВНО логируем что возвращаем:
+            console.log('[server.js] /api/collections result:', result);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(result, null, 2));
             return;
@@ -51,16 +169,11 @@ async function startServer() {
             await col.initPromise;
             let docs = await col.getAll();
 
-            // Фильтрация: filter_<field>=value (WARNING: только equals, небезопасно для сложных данных)
-            // TODO: Расширить синтаксис фильтрации (например, filter_<field>__gt, __lt и др.)
-            for (const [key, value] of Object.entries(query)) {
-                if (key.startsWith('filter_')) {
-                    const field = key.slice(7);
-                    docs = docs.filter(doc => String(doc[field]) === value);
-                }
+            const filter = parseFilterFromQuery(query);
+            if (Object.keys(filter).length > 0) {
+                docs = docs.filter(doc => matchFilter(doc, filter));
             }
 
-            // Сортировка
             if (query.sort) {
                 const field = query.sort;
                 const order = query.order === 'desc' ? -1 : 1;
@@ -74,7 +187,6 @@ async function startServer() {
                     return 0;
                 });
             }
-            // Пагинация
             const offset = parseInt(query.offset || '0', 10);
             const limit = parseInt(query.limit || '10', 10);
             docs = docs.slice(offset, offset + limit);
@@ -113,18 +225,17 @@ async function startServer() {
             return;
         }
 
-        // WARNING: Безопасность
-        // Внимание: Встроенный сервер Data Explorer НЕ содержит никакой аутентификации/авторизации.
-        // Используйте только в закрытых, доверенных локальных сетях/на локальной машине.
-        // TODO: Если потребуется для production, добавить слой auth (например, по токену/логину).
-
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Not found' }));
     });
 
     server.listen(PORT, () => {
-        console.log(`WiseJSON Data Explorer running at http://127.0.0.1:${PORT}/`);
-        // WARNING: Эксплорер открыт без авторизации! Не используйте в публичных сетях!
+        if (useAuth) {
+            console.log(`WiseJSON Data Explorer (auth required) at http://127.0.0.1:${PORT}/`);
+        } else {
+            console.log(`WiseJSON Data Explorer running at http://127.0.0.1:${PORT}/`);
+            console.log('WARNING: Explorer открыт без авторизации! Не используйте в публичных сетях!');
+        }
     });
 }
 
@@ -144,16 +255,11 @@ function serveStaticFile(filename, res) {
 
 function getContentType(ext) {
     switch (ext) {
-        case '.html':
-            return 'text/html';
-        case '.css':
-            return 'text/css';
-        case '.js':
-            return 'application/javascript';
-        case '.json':
-            return 'application/json';
-        default:
-            return 'text/plain';
+        case '.html': return 'text/html';
+        case '.css': return 'text/css';
+        case '.js': return 'application/javascript';
+        case '.json': return 'application/json';
+        default: return 'text/plain';
     }
 }
 
