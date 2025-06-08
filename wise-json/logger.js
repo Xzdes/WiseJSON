@@ -3,7 +3,11 @@
 /**
  * Лёгкая абстракция для централизованного логирования в проекте wise-json.
  * Уровень задаётся через переменную окружения LOG_LEVEL (error, warn, log, debug).
- * По умолчанию: log.
+ * По умолчанию для продакшена: warn. Для разработки/тестов: log.
+ * Отключение цветов через LOG_NO_COLOR=true.
+ * 
+ * Логгер спроектирован так, чтобы ошибки внутри него самого (например, при форматировании)
+ * не приводили к падению основного приложения.
  */
 
 // Цвета для терминала
@@ -19,81 +23,158 @@ const colors = {
 const levels = {
   error: 0,
   warn: 1,
-  log: 2,    // Был info, теперь log
+  log: 2,
   debug: 3,
 };
 
 const colorMap = {
   error: colors.red,
   warn: colors.yellow,
-  log: colors.cyan,     // Был info, теперь log
+  log: colors.cyan,
   debug: colors.gray,
 };
 
-// Получаем уровень логирования из переменной окружения
+// --- Конфигурация ---
 const envLevel = process.env.LOG_LEVEL && typeof process.env.LOG_LEVEL === "string"
   ? process.env.LOG_LEVEL.toLowerCase()
   : null;
 
-const currentLevel = envLevel && levels[envLevel] !== undefined ? levels[envLevel] : levels.log;
+// По умолчанию: 'warn' для 'production' окружения, иначе 'log'
+const defaultLogLevel = process.env.NODE_ENV === 'production' ? 'warn' : 'log';
+const currentLevel = envLevel && levels[envLevel] !== undefined ? levels[envLevel] : levels[defaultLogLevel];
+
+const NO_COLOR = process.env.LOG_NO_COLOR === 'true';
 
 /**
- * Форматирует сообщение с датой, уровнем и цветом.
+ * Безопасное преобразование аргументов в строку.
+ * @param {any[]} args 
+ * @returns {string}
+ */
+function safeArgsToString(args) {
+    try {
+        return args.map(arg => {
+            if (arg instanceof Error) {
+                return arg.stack || arg.message; // Для ошибок выводим стек
+            }
+            if (typeof arg === 'object' && arg !== null) {
+                try {
+                    return JSON.stringify(arg); // Пытаемся сериализовать объекты
+                } catch (e) {
+                    return '[Unserializable Object]';
+                }
+            }
+            return String(arg); // Для примитивов и всего остального
+        }).join(" ");
+    } catch (e) {
+        // Крайне маловероятно, но на всякий случай
+        console.error('[Logger Internal Error] Failed to process arguments for logging:', e);
+        return '[Error processing log arguments]';
+    }
+}
+
+
+/**
+ * Форматирует сообщение с датой, уровнем и цветом (если включено).
  * @param {string} level - Уровень логирования (error|warn|log|debug)
  * @param {string} msg - Сообщение
  * @returns {string}
  */
 function format(level, msg) {
-  const ts = new Date().toISOString();
-  return `${colorMap[level]}[${ts}] [${level.toUpperCase()}]${colors.reset} ${msg}`;
+  try {
+    const ts = new Date().toISOString();
+    if (NO_COLOR) {
+      return `[${ts}] [${level.toUpperCase()}] ${msg}`;
+    }
+    const color = colorMap[level] || colors.reset; // Защита, если level некорректен
+    return `${color}[${ts}] [${level.toUpperCase()}]${colors.reset} ${msg}`;
+  } catch (e) {
+    // Если ошибка при форматировании, возвращаем "сырое" сообщение, чтобы не потерять его
+    console.error('[Logger Internal Error] Failed to format log message:', e);
+    return `[RAW - ${level.toUpperCase()}] ${msg}`;
+  }
 }
 
-module.exports = {
+const logger = {
   /**
-   * Лог ошибок. Всегда выводится.
+   * Лог ошибок. Всегда выводится, если уровень позволяет.
    * @param {...any} args
    */
   error(...args) {
     if (currentLevel >= levels.error) {
-      console.error(format("error", args.map(String).join(" ")));
+      try {
+        const message = safeArgsToString(args);
+        console.error(format("error", message));
+      } catch (e) {
+        // Если даже console.error падает (например, дескриптор закрыт), мы мало что можем сделать,
+        // но основное приложение не должно упасть из-за логгера.
+        // Этот catch здесь больше для демонстрации идеи "не падать".
+        // В реальности, если console.error не работает, проблема глубже.
+      }
     }
   },
 
   /**
-   * Лог предупреждений. Выводится если уровень warn или ниже.
+   * Лог предупреждений.
    * @param {...any} args
    */
   warn(...args) {
     if (currentLevel >= levels.warn) {
-      console.warn(format("warn", args.map(String).join(" ")));
+      try {
+        const message = safeArgsToString(args);
+        console.warn(format("warn", message));
+      } catch (e) {
+        // Аналогично error
+      }
     }
   },
 
   /**
-   * Основной информационный лог. Аналог console.log.
+   * Основной информационный лог.
    * @param {...any} args
    */
   log(...args) {
     if (currentLevel >= levels.log) {
-      console.log(format("log", args.map(String).join(" ")));
+      try {
+        const message = safeArgsToString(args);
+        console.log(format("log", message));
+      } catch (e) {
+        // Аналогично error
+      }
     }
   },
 
   /**
-   * Отладочный лог. Только при LOG_LEVEL=debug.
+   * Отладочный лог.
    * @param {...any} args
    */
   debug(...args) {
     if (currentLevel >= levels.debug) {
-      console.log(format("debug", args.map(String).join(" ")));
+      try {
+        const message = safeArgsToString(args);
+        console.log(format("debug", message)); // Используем console.log для debug
+      } catch (e) {
+        // Аналогично error
+      }
     }
   },
 
   /**
-   * Возвращает текущий уровень логирования.
+   * Возвращает текущий уровень логирования в виде строки.
    * @returns {string}
    */
   getLevel() {
-    return Object.keys(levels).find((k) => levels[k] === currentLevel);
+    return Object.keys(levels).find((k) => levels[k] === currentLevel) || defaultLogLevel;
   },
+
+  /**
+   * Возвращает числовое представление текущего уровня логирования.
+   * @returns {number}
+   */
+  getCurrentLevelNumber() {
+    return currentLevel;
+  },
+
+  levels: { ...levels } // Экспортируем уровни, если нужно сравнение извне
 };
+
+module.exports = logger;
