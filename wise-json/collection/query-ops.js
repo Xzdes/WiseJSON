@@ -1,7 +1,7 @@
 // wise-json/collection/query-ops.js
 
 const { cleanupExpiredDocs, isAlive } = require('./ttl.js'); // Предполагаем, что ttl.js в той же директории
-
+const logger = require('../logger');
 /**
  * Получает документ по его ID.
  * @param {string} id - ID документа.
@@ -99,7 +99,7 @@ async function findByIndexedValue(fieldName, value) {
     // Если индекса нет, можно либо вернуть пустой массив, либо упасть с ошибкой,
     // либо выполнить полный перебор (что медленно и не ожидается от findByIndexedValue).
     // Возврат пустого массива - наиболее безопасное поведение.
-    // console.warn(`[Query Ops] Попытка поиска по несуществующему индексу: ${fieldName}`);
+    // logger.warn(`[Query Ops] Попытка поиска по несуществующему индексу: ${fieldName}`);
     return [];
   }
 

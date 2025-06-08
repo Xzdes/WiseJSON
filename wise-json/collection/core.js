@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs/promises');
 const CollectionEventEmitter = require('./events.js');
 const IndexManager = require('./indexes.js');
+const logger = require('../logger');
 const createCheckpointController = require('./checkpoints.js'); // Функция-фабрика
 const {
   defaultIdGenerator,
@@ -295,13 +296,13 @@ class Collection {
         try {
             this._indexManager.createIndex(indexMeta.fieldName, { unique: indexMeta.type === 'unique' });
         } catch (e) {
-            // console.warn(`[WiseJSON] Failed to restore index '${indexMeta.fieldName}' for collection '${this.name}': ${e.message}`);
+            // logger.warn(`[WiseJSON] Failed to restore index '${indexMeta.fieldName}' for collection '${this.name}': ${e.message}`);
         }
     }
 
     const walEntries = await readWal(this.walPath, loadedCheckpoint.timestamp, this.options.walReadOptions);
     if (walEntries.length > 0) {
-    //   console.log(`[WiseJSON] Applying ${walEntries.length} WAL entries for collection: ${this.name}`);
+    //   logger.log(`[WiseJSON] Applying ${walEntries.length} WAL entries for collection: ${this.name}`);
     }
     for (const entry of walEntries) {
       if (entry.txn === 'op' && entry._txn_applied) { // Транзакционные операции
@@ -337,10 +338,10 @@ class Collection {
     if (this.options.checkpointIntervalMs > 0) {
         this._checkpointTimerId = setInterval(async () => {
             try {
-                // console.log(`[WiseJSON] Auto-checkpoint triggered by timer for collection: ${this.name}`);
+                // logger.log(`[WiseJSON] Auto-checkpoint triggered by timer for collection: ${this.name}`);
                 await this.flushToDisk();
             } catch (e) {
-                console.error(`[WiseJSON] Error during auto-checkpoint for ${this.name}:`, e);
+                logger.error(`[WiseJSON] Error during auto-checkpoint for ${this.name}:`, e);
             }
         }, this.options.checkpointIntervalMs);
     }
@@ -361,10 +362,10 @@ class Collection {
             try {
                 const removed = cleanupExpiredDocs(this.documents, this._indexManager);
                 if (removed > 0) {
-                //   console.log(`[WiseJSON] [TTL] Auto-cleanup: removed ${removed} documents (collection: ${this.name})`);
+                //   logger.log(`[WiseJSON] [TTL] Auto-cleanup: removed ${removed} documents (collection: ${this.name})`);
                 }
             } catch (e) {
-                console.error(`[WiseJSON] [TTL] Error during auto-cleanup for ${this.name}:`, e);
+                logger.error(`[WiseJSON] [TTL] Error during auto-cleanup for ${this.name}:`, e);
             }
         }, this.options.ttlCleanupIntervalMs);
     }
@@ -381,9 +382,9 @@ class Collection {
     this._stats.walEntriesSinceCheckpoint++;
     if (this.options.maxWalEntriesBeforeCheckpoint > 0 &&
         this._stats.walEntriesSinceCheckpoint >= this.options.maxWalEntriesBeforeCheckpoint) {
-        // console.log(`[WiseJSON] Auto-checkpoint triggered by WAL entry count for collection: ${this.name}`);
+        // logger.log(`[WiseJSON] Auto-checkpoint triggered by WAL entry count for collection: ${this.name}`);
         this.flushToDisk().catch(e => { // Запускаем асинхронно, чтобы не блокировать текущую операцию
-            console.error(`[WiseJSON] Error during WAL-triggered checkpoint for ${this.name}:`, e);
+            logger.error(`[WiseJSON] Error during WAL-triggered checkpoint for ${this.name}:`, e);
         });
     }
   }
@@ -412,7 +413,7 @@ class Collection {
             await cleanupOldCheckpoints(this.checkpointsDir, this.name, this.options.checkpointsToKeep);
         }
         
-        // console.log(`[WiseJSON] Flushed to disk for collection: ${this.name}`);
+        // logger.log(`[WiseJSON] Flushed to disk for collection: ${this.name}`);
         return checkpointResult;
     } finally {
         await this._releaseLockIfHeld();
@@ -423,7 +424,7 @@ class Collection {
     this.stopCheckpointTimer();
     this._stopTtlCleanupTimer();
     await this.flushToDisk(); // Финальное сохранение
-    // console.log(`[WiseJSON] Closed collection: ${this.name} (final flush complete)`);
+    // logger.log(`[WiseJSON] Closed collection: ${this.name} (final flush complete)`);
   }
 
   stats() {
@@ -443,7 +444,7 @@ class Collection {
     return this._enqueue(async () => { // Операции с индексами должны быть в очереди
         this._indexManager.createIndex(fieldName, options);
         this._indexManager.rebuildIndexesFromData(this.documents);
-        // console.log(`[WiseJSON] Created index on field '${fieldName}' (collection: ${this.name})`);
+        // logger.log(`[WiseJSON] Created index on field '${fieldName}' (collection: ${this.name})`);
         // Последующий flushToDisk сохранит метаданные индексов в чекпоинт
     });
   }
@@ -451,7 +452,7 @@ class Collection {
   async dropIndex(fieldName) {
     return this._enqueue(async () => {
         this._indexManager.dropIndex(fieldName);
-        // console.log(`[WiseJSON] Dropped index on field '${fieldName}' (collection: ${this.name})`);
+        // logger.log(`[WiseJSON] Dropped index on field '${fieldName}' (collection: ${this.name})`);
     });
   }
 
@@ -478,7 +479,7 @@ class Collection {
       case 'update': await this._applyTransactionUpdate(entry.args[0], entry.args[1], entry.txid); break;
       case 'remove': await this._applyTransactionRemove(entry.args[0], entry.txid); break;
       case 'clear': await this._applyTransactionClear(entry.txid); break;
-      default: console.warn(`[WiseJSON] Unknown transaction WAL op type in collection ${this.name}: ${entry.type}`);
+      default: logger.warn(`[WiseJSON] Unknown transaction WAL op type in collection ${this.name}: ${entry.type}`);
     }
   }
   async _applyTransactionInsert(docData, txid) {

@@ -1,7 +1,7 @@
 // wise-json/collection/transaction-manager.js
 
 const { v4: uuidv4 } = require('uuid');
-
+const logger = require('../logger');
 /**
  * TransactionManager управляет транзакцией между несколькими коллекциями.
  * Используется только внутри WiseJSON.
@@ -158,7 +158,7 @@ class TransactionManager {
             } catch (err) {
                 // ASSUMPTION: Ошибки на этом этапе не приводят к откату WAL; требуется ручное вмешательство, если нужно полное восстановление.
                 // TODO: В будущем возможна компенсация (rollback) или запись ошибок в отдельный журнал.
-                console.error(`TransactionManager: Ошибка применения операции в коллекции "${op.colName}": ${err.message}`);
+                logger.error(`TransactionManager: Ошибка применения операции в коллекции "${op.colName}": ${err.message}`);
                 // Не прерываем остальные операции, чтобы не создавать неконсистентность между коллекциями.
             }
         }

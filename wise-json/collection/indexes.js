@@ -1,5 +1,5 @@
 // collection/indexes.js
-
+const logger = require('../logger');
 /**
  * Управляет индексами коллекции.
  */
@@ -71,7 +71,7 @@ class IndexManager {
                 if (def.type === 'unique') {
                     if (value !== undefined && value !== null) {
                         if (def.data.has(value)) {
-                            console.warn(`[IndexManager] Дублирующее значение '${value}' в уникальном индексе '${fieldName}' при восстановлении`);
+                            logger.warn(`[IndexManager] Дублирующее значение '${value}' в уникальном индексе '${fieldName}' при восстановлении`);
                         }
                         def.data.set(value, id);
                     }

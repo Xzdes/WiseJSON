@@ -9,10 +9,12 @@ const fs = require('fs');
 const path = require('path');
 const WiseJSON = require('../wise-json/index.js');
 
+const logger = require('../wise-json/logger');
+
 const PORT = process.env.PORT || 3000;
 const DB_PATH = process.env.WISE_JSON_PATH || path.resolve(process.cwd(), 'wise-json-db-data');
 
-console.log('[server.js] DB_PATH used:', DB_PATH);
+logger.log('[server.js] DB_PATH used:', DB_PATH);
 
 const db = new WiseJSON(DB_PATH);
 
@@ -156,7 +158,7 @@ async function startServer() {
                 result.push({ name, count });
             }
             // ЯВНО логируем что возвращаем:
-            console.log('[server.js] /api/collections result:', result);
+            logger.log('[server.js] /api/collections result:', result);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(result, null, 2));
             return;
@@ -231,10 +233,10 @@ async function startServer() {
 
     server.listen(PORT, () => {
         if (useAuth) {
-            console.log(`WiseJSON Data Explorer (auth required) at http://127.0.0.1:${PORT}/`);
+            logger.log(`WiseJSON Data Explorer (auth required) at http://127.0.0.1:${PORT}/`);
         } else {
-            console.log(`WiseJSON Data Explorer running at http://127.0.0.1:${PORT}/`);
-            console.log('WARNING: Explorer открыт без авторизации! Не используйте в публичных сетях!');
+            logger.log(`WiseJSON Data Explorer running at http://127.0.0.1:${PORT}/`);
+            logger.log('WARNING: Explorer открыт без авторизации! Не используйте в публичных сетях!');
         }
     });
 }

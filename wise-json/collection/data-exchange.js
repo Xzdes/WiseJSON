@@ -12,7 +12,7 @@ const fs = require('fs/promises'); // Для асинхронной работы
 // Однако, она используется в Collection.exportCsv в core.js, так что может быть уже там.
 // Если нет, нужно будет ее импортировать:
 // const { flattenDocToCsv } = require('./utils.js'); // Или из '../utils.js' если структура изменится
-
+const logger = require('../logger');
 /**
  * Экспортирует все "живые" документы коллекции в JSON-файл.
  * @param {string} filePath - Путь к файлу для экспорта.
@@ -25,9 +25,9 @@ async function exportJson(filePath, options = {}) {
   const docs = await this.getAll();
   try {
     await fs.writeFile(filePath, JSON.stringify(docs, null, 2), 'utf8');
-    // console.log(`[Data Exchange] Exported ${docs.length} documents to ${filePath}`);
+    // logger.log(`[Data Exchange] Exported ${docs.length} documents to ${filePath}`);
   } catch (error) {
-    console.error(`[Data Exchange] Error exporting JSON to ${filePath}:`, error);
+    logger.error(`[Data Exchange] Error exporting JSON to ${filePath}:`, error);
     throw error; // Пробрасываем ошибку дальше
   }
 }
@@ -44,9 +44,9 @@ async function exportCsv(filePath) {
   if (docs.length === 0) {
     try {
       await fs.writeFile(filePath, '', 'utf8'); // Создаем пустой файл
-      // console.log(`[Data Exchange] No documents to export. Created empty CSV file: ${filePath}`);
+      // logger.log(`[Data Exchange] No documents to export. Created empty CSV file: ${filePath}`);
     } catch (error) {
-      console.error(`[Data Exchange] Error creating empty CSV file ${filePath}:`, error);
+      logger.error(`[Data Exchange] Error creating empty CSV file ${filePath}:`, error);
       throw error;
     }
     return;
@@ -64,9 +64,9 @@ async function exportCsv(filePath) {
   try {
     const csvData = flattenDocToCsv(docs);
     await fs.writeFile(filePath, csvData, 'utf8');
-    // console.log(`[Data Exchange] Exported ${docs.length} documents to ${filePath} (CSV)`);
+    // logger.log(`[Data Exchange] Exported ${docs.length} documents to ${filePath} (CSV)`);
   } catch (error) {
-    console.error(`[Data Exchange] Error exporting CSV to ${filePath}:`, error);
+    logger.error(`[Data Exchange] Error exporting CSV to ${filePath}:`, error);
     throw error;
   }
 }
@@ -87,18 +87,18 @@ async function importJson(filePath, options = {}) {
     const rawData = await fs.readFile(filePath, 'utf8');
     jsonData = JSON.parse(rawData);
   } catch (error) {
-    console.error(`[Data Exchange] Error reading or parsing JSON file ${filePath}:`, error);
+    logger.error(`[Data Exchange] Error reading or parsing JSON file ${filePath}:`, error);
     throw error;
   }
 
   if (!Array.isArray(jsonData)) {
     const error = new Error('Import file must contain a JSON array of documents.');
-    console.error(`[Data Exchange] ${error.message}`);
+    logger.error(`[Data Exchange] ${error.message}`);
     throw error;
   }
 
   if (jsonData.length === 0) {
-    // console.log('[Data Exchange] Import file is empty. No documents to import.');
+    // logger.log('[Data Exchange] Import file is empty. No documents to import.');
     return; // Ничего не делаем, если массив пуст
   }
 
@@ -109,9 +109,9 @@ async function importJson(filePath, options = {}) {
     // `this.insertMany()` - метод из crud-ops (или ops.js)
     // Он должен корректно обработать пакетную вставку, включая проверки уникальности, если есть.
     const insertedDocs = await this.insertMany(jsonData);
-    // console.log(`[Data Exchange] Imported ${insertedDocs.length} documents from ${filePath} (mode: ${mode})`);
+    // logger.log(`[Data Exchange] Imported ${insertedDocs.length} documents from ${filePath} (mode: ${mode})`);
   } catch (error) {
-    console.error(`[Data Exchange] Error during import operation (mode: ${mode}):`, error);
+    logger.error(`[Data Exchange] Error during import operation (mode: ${mode}):`, error);
     throw error;
   }
 }

@@ -7,6 +7,8 @@ const { makeAbsolutePath, validateOptions } = require('./collection/utils.js');
 
 const DEFAULT_PATH = process.env.WISE_JSON_PATH || makeAbsolutePath('wise-json-db-data');
 
+const logger = require('./logger');
+
 class WiseJSON {
     constructor(dbRootPath = DEFAULT_PATH, options = {}) {
         this.dbRootPath = makeAbsolutePath(dbRootPath);
@@ -70,13 +72,13 @@ class WiseJSON {
                 if (isShuttingDown) return;
                 isShuttingDown = true;
                 try {
-                    console.log(`\n[WiseJSON] Получен сигнал ${signal}, сохраняем все коллекции...`);
+                    logger.log(`\n[WiseJSON] Получен сигнал ${signal}, сохраняем все коллекции...`);
                     if (this && typeof this.close === 'function') {
                         await this.close();
                     }
-                    console.log('[WiseJSON] Всё сохранено. Завершение работы.');
+                    logger.log('[WiseJSON] Всё сохранено. Завершение работы.');
                 } catch (e) {
-                    console.error('[WiseJSON] Ошибка при автосохранении при завершении:', e);
+                    logger.error('[WiseJSON] Ошибка при автосохранении при завершении:', e);
                 } finally {
                     process.exit(0);
                 }

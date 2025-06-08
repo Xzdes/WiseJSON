@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs/promises');
 const { cleanupExpiredDocs } = require('./ttl.js');
 
+
 /**
  * Генерирует имя файла чекпоинта с учётом сегмента (или без).
  * @param {string} collectionName

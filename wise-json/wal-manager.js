@@ -2,6 +2,7 @@
 
 const fs = require('fs/promises');
 const path = require('path');
+const logger = require('./logger');
 
 /**
  * Возвращает путь к WAL-файлу для коллекции.
@@ -58,7 +59,7 @@ async function appendFileWithRetry(walPath, text, retries = 5) {
             // ASSUMPTION: Ретрай только на ENOSPC, EBUSY, EIO, временные сбои
             if (i < retries && ['ENOSPC', 'EBUSY', 'EIO', 'EMFILE', 'EAGAIN'].includes(err.code)) {
                 const wait = 100 * (i + 1);
-                console.warn(`[WAL] appendFile retry #${i + 1} for ${walPath}, reason: ${err.code} (${wait}ms)`);
+                logger.warn(`[WAL] appendFile retry #${i + 1} for ${walPath}, reason: ${err.code} (${wait}ms)`);
                 await delay(wait);
                 continue;
             } else {
@@ -67,7 +68,7 @@ async function appendFileWithRetry(walPath, text, retries = 5) {
         }
     }
     // Последняя ошибка
-    console.error(`[WAL] Ошибка appendFile для WAL (после ретраев): ${lastErr && lastErr.message}`);
+    logger.error(`[WAL] Ошибка appendFile для WAL (после ретраев): ${lastErr && lastErr.message}`);
     throw lastErr;
 }
 
@@ -83,7 +84,7 @@ async function appendWalEntry(walPath, entry, retries = 5) {
         await appendFileWithRetry(walPath, JSON.stringify(entry) + '\n', retries);
     } catch (err) {
         // ASSUMPTION: Ошибка записи в WAL считается критической для crash-safe механики.
-        console.error(`[WAL] Ошибка appendFile для WAL: ${err.message}`);
+        logger.error(`[WAL] Ошибка appendFile для WAL: ${err.message}`);
         throw err;
     }
 }
@@ -135,11 +136,11 @@ async function readWal(walPath, sinceTimestamp = null, options = {}) {
                 throw new Error(`[WAL] Не удалось распарсить запись WAL: ${e.stack || e.message}\nLine: ${lineNum}`);
             } else if (options.recover) {
                 // recover: просто скипаем и идем дальше (возможно добавить recover-контроль)
-                console.warn(`[WAL] recover: повреждена строка WAL, пропускаю line ${lineNum}`);
+                logger.warn(`[WAL] recover: повреждена строка WAL, пропускаю line ${lineNum}`);
                 continue;
             } else {
                 // default: предупреждение и пропуск
-                console.warn(`[WAL] ⚠ Не удалось распарсить запись WAL: ${e.stack || e.message}\nLine: ${lineNum}`);
+                logger.warn(`[WAL] ⚠ Не удалось распарсить запись WAL: ${e.stack || e.message}\nLine: ${lineNum}`);
                 continue;
             }
         }
@@ -180,9 +181,9 @@ async function readWal(walPath, sinceTimestamp = null, options = {}) {
     }
 
     if (sinceTimestamp) {
-        console.log(`[WAL] Прочитано ${result.length} записей WAL, созданных после checkpoint (${sinceTimestamp})`);
+        logger.log(`[WAL] Прочитано ${result.length} записей WAL, созданных после checkpoint (${sinceTimestamp})`);
     } else {
-        console.log(`[WAL] Прочитано ${result.length} записей WAL (без фильтрации по времени)`);
+        logger.log(`[WAL] Прочитано ${result.length} записей WAL (без фильтрации по времени)`);
     }
     return result;
 }
@@ -219,15 +220,15 @@ async function compactWal(walPath, sinceTimestamp = null) {
     while (true) {
         try {
             await fs.writeFile(walPath, lines.length ? lines + '\n' : '', 'utf8');
-            console.log(`[WAL] Компакция WAL завершена. Осталось ${filtered.length} записей.`);
+            logger.log(`[WAL] Компакция WAL завершена. Осталось ${filtered.length} записей.`);
             break;
         } catch (err) {
             attempt++;
             if (attempt < maxAttempts) {
-                console.warn(`[WAL] Ошибка при компакции WAL (попытка ${attempt}), повторяю: ${err.message}`);
+                logger.warn(`[WAL] Ошибка при компакции WAL (попытка ${attempt}), повторяю: ${err.message}`);
                 await delay(100 * attempt);
             } else {
-                console.error(`[WAL] Ошибка при компакции WAL (после ${maxAttempts} попыток): ${err.message}`);
+                logger.error(`[WAL] Ошибка при компакции WAL (после ${maxAttempts} попыток): ${err.message}`);
                 break;
             }
         }
@@ -269,7 +270,7 @@ async function writeTransactionBlock(walPath, txid, ops, retries = 5) {
             attempt++;
             if (attempt <= retries && ['ENOSPC', 'EBUSY', 'EIO', 'EMFILE', 'EAGAIN'].includes(err.code)) {
                 const wait = 100 * attempt;
-                console.warn(`[WAL] writeTransactionBlock retry #${attempt} for ${walPath}, reason: ${err.code} (${wait}ms)`);
+                logger.warn(`[WAL] writeTransactionBlock retry #${attempt} for ${walPath}, reason: ${err.code} (${wait}ms)`);
                 await delay(wait);
                 continue;
             } else {
@@ -278,7 +279,7 @@ async function writeTransactionBlock(walPath, txid, ops, retries = 5) {
         }
     }
     // ASSUMPTION: Ошибка при записи блока транзакции делает транзакцию несостоятельной — вызываем ошибку.
-    console.error(`[WAL] Ошибка записи транзакционного блока (после ретраев): ${lastErr && lastErr.message}`);
+    logger.error(`[WAL] Ошибка записи транзакционного блока (после ретраев): ${lastErr && lastErr.message}`);
     throw lastErr;
 }
 

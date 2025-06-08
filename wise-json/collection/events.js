@@ -1,5 +1,5 @@
 // collection/events.js
-
+const logger = require('../logger');
 /**
  * Класс EventEmitter для локальных событий в Collection.
  */
@@ -58,11 +58,11 @@ class CollectionEventEmitter {
                 const result = listener(...filteredArgs);
                 if (result instanceof Promise) {
                     result.catch(e =>
-                        console.error(`Collection (${this._collectionName}) async event error '${eventName}': ${e.message}`)
+                        logger.error(`Collection (${this._collectionName}) async event error '${eventName}': ${e.message}`)
                     );
                 }
             } catch (e) {
-                console.error(`Collection (${this._collectionName}) sync event error '${eventName}': ${e.message}`);
+                logger.error(`Collection (${this._collectionName}) sync event error '${eventName}': ${e.message}`);
             }
         }
     }

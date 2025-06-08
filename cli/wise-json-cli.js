@@ -4,6 +4,8 @@ const fs = require('fs/promises');
 const path = require('path');
 const WiseJSON = require('../wise-json/index.js');
 
+const logger = require('../wise-json/logger');
+
 /**
  * Проверяет документ на соответствие фильтру с поддержкой операторов ($gt, $lt, $in, $regex и т.д.)
  * @param {object} doc
@@ -154,11 +156,11 @@ wise-json-cli <command> [options]
 `;
 
 function printHelp() {
-    console.log(LANG === 'ru' ? RU_HELP : EN_HELP);
+    logger.log(LANG === 'ru' ? RU_HELP : EN_HELP);
 }
 
 function prettyError(msg, code = 1) {
-    console.error('\x1b[31m%s\x1b[0m', msg);
+    logger.error('\x1b[31m%s\x1b[0m', msg);
     process.exit(code);
 }
 
@@ -178,7 +180,7 @@ async function main() {
         const db = new WiseJSON(DB_PATH);
         await db.init();
         const cols = await db.getCollectionNames();
-        console.log((LANG === 'ru' ? 'Коллекции:' : 'Collections:'), cols);
+        logger.log((LANG === 'ru' ? 'Коллекции:' : 'Collections:'), cols);
         process.exit(0);
     }
 
@@ -191,11 +193,11 @@ async function main() {
         const stats = await collection.stats();
         const indexes = await collection.getIndexes();
         if (LANG === 'ru') {
-            console.log('Статистика:', stats);
-            console.log('Индексы:', indexes);
+            logger.log('Статистика:', stats);
+            logger.log('Индексы:', indexes);
         } else {
-            console.log('Stats:', stats);
-            console.log('Indexes:', indexes);
+            logger.log('Stats:', stats);
+            logger.log('Indexes:', indexes);
         }
         process.exit(0);
     }
@@ -213,7 +215,7 @@ async function main() {
             prettyError(LANG === 'ru' ? 'Ошибка парсинга JSON' : 'JSON parse error');
         }
         await collection.insert(doc);
-        console.log((LANG === 'ru' ? 'Вставлено:' : 'Inserted:'), doc);
+        logger.log((LANG === 'ru' ? 'Вставлено:' : 'Inserted:'), doc);
         process.exit(0);
     }
 
@@ -240,7 +242,7 @@ async function main() {
             data = data.map(doc => ({ ...doc, expireAt: now + ttl }));
         }
         const inserted = await collection.insertMany(data);
-        console.log(
+        logger.log(
             LANG === 'ru'
                 ? `Вставлено документов: ${inserted.length}.`
                 : `Inserted ${inserted.length} documents.`
@@ -271,7 +273,7 @@ async function main() {
         } else {
             docs = await collection.find(() => true);
         }
-        console.log(JSON.stringify(docs, null, 2));
+        logger.log(JSON.stringify(docs, null, 2));
         process.exit(0);
     }
 
@@ -282,7 +284,7 @@ async function main() {
         const collection = await db.collection(cleanArgs[1]);
         await collection.initPromise;
         const doc = await collection.getById(cleanArgs[2]);
-        console.log(JSON.stringify(doc, null, 2));
+        logger.log(JSON.stringify(doc, null, 2));
         process.exit(0);
     }
 
@@ -293,7 +295,7 @@ async function main() {
         const collection = await db.collection(cleanArgs[1]);
         await collection.initPromise;
         await collection.remove(cleanArgs[2]);
-        console.log(
+        logger.log(
             LANG === 'ru'
                 ? `Удалён: ${cleanArgs[2]}`
                 : `Removed ${cleanArgs[2]}`
@@ -308,7 +310,7 @@ async function main() {
         const collection = await db.collection(cleanArgs[1]);
         await collection.initPromise;
         await collection.clear();
-        console.log(
+        logger.log(
             LANG === 'ru'
                 ? 'Коллекция очищена.'
                 : 'Collection cleared.'
@@ -324,7 +326,7 @@ async function main() {
         await collection.initPromise;
         const docs = await collection.getAll();
         await fs.writeFile(cleanArgs[2], JSON.stringify(docs, null, 2), 'utf8');
-        console.log(
+        logger.log(
             LANG === 'ru'
                 ? `Экспортировано ${docs.length} документов в ${cleanArgs[2]}.`
                 : `Exported ${docs.length} documents to ${cleanArgs[2]}.`
@@ -345,7 +347,7 @@ async function main() {
             prettyError(LANG === 'ru' ? 'Ошибка чтения или парсинга файла' : 'File read or parse error');
         }
         const inserted = await collection.insertMany(data);
-        console.log(
+        logger.log(
             LANG === 'ru'
                 ? `Импортировано ${inserted.length} документов из ${cleanArgs[2]}.`
                 : `Imported ${inserted.length} documents from ${cleanArgs[2]}.`

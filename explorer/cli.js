@@ -9,13 +9,15 @@ const fsAsync = require('fs/promises');
 const path = require('path');
 const WiseJSON = require('../wise-json/index.js');
 
+const logger = require('../wise-json/logger');
+
 const DB_PATH = process.env.WISE_JSON_PATH || path.resolve(process.cwd(), 'wise-json-db-data');
 
 /**
  * Быстрый вывод ошибки и выход
  */
 function prettyError(msg, code = 1) {
-    console.error('\x1b[31m%s\x1b[0m', msg);
+    logger.error('\x1b[31m%s\x1b[0m', msg);
     process.exit(code);
 }
 
@@ -34,7 +36,7 @@ async function main() {
     const command = args[0];
 
     if (!command || ['help', '--help', '-h'].includes(command)) {
-        console.log(`
+        logger.log(`
 wisejson-explorer <command> [options]
 
 Commands:
@@ -84,7 +86,7 @@ Options:
             const collection = await db.collection(col);
             await collection.initPromise;
             const count = await collection.count();
-            console.log(`${col}: ${count} documents`);
+            logger.log(`${col}: ${count} documents`);
         }
         process.exit(0);
     }
@@ -158,12 +160,12 @@ Options:
         docs = docs.slice(offset, offset + limit);
 
         if (output === 'json') {
-            console.log(JSON.stringify(docs, null, 2));
+            logger.log(JSON.stringify(docs, null, 2));
         } else if (output === 'csv') {
             const { flattenDocToCsv } = require('./utils.js');
-            console.log(flattenDocToCsv(docs));
+            logger.log(flattenDocToCsv(docs));
         } else if (output === 'table') {
-            console.table(docs);
+            logger.table(docs);
         }
 
         process.exit(0);
@@ -181,7 +183,7 @@ Options:
         if (!doc) {
             prettyError(`Document "${args[2]}" not found in collection "${collectionName}"`, 1);
         }
-        console.log(JSON.stringify(doc, null, 2));
+        logger.log(JSON.stringify(doc, null, 2));
         process.exit(0);
     }
 
@@ -194,7 +196,7 @@ Options:
         const col = await db.collection(collectionName);
         await col.initPromise;
         const stats = await col.stats();
-        console.log(stats);
+        logger.log(stats);
         process.exit(0);
     }
 
@@ -209,7 +211,7 @@ Options:
         const output = args.includes('--output') ? args[args.indexOf('--output') + 1] : 'json';
         if (output === 'csv') {
             await col.exportCsv(args[2]);
-            console.log(`Exported to ${args[2]}`);
+            logger.log(`Exported to ${args[2]}`);
         } else {
             await col.exportJson(args[2]);
         }
@@ -237,7 +239,7 @@ Options:
         await db.init();
         const col = await db.collection(collectionName);
         await col.initPromise;
-        console.log(await col.getIndexes());
+        logger.log(await col.getIndexes());
         process.exit(0);
     }
 
@@ -252,7 +254,7 @@ Options:
         const col = await db.collection(collectionName);
         await col.initPromise;
         await col.createIndex(fieldName, { unique });
-        console.log(`Index on field '${fieldName}' created (unique: ${unique}).`);
+        logger.log(`Index on field '${fieldName}' created (unique: ${unique}).`);
         process.exit(0);
     }
 
@@ -266,7 +268,7 @@ Options:
         const col = await db.collection(collectionName);
         await col.initPromise;
         await col.dropIndex(fieldName);
-        console.log(`Index on field '${fieldName}' dropped.`);
+        logger.log(`Index on field '${fieldName}' dropped.`);
         process.exit(0);
     }
 

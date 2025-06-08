@@ -2,6 +2,8 @@ const path = require('path');
 const fs = require('fs/promises');
 const { cleanupExpiredDocs } = require('./collection/ttl.js');
 
+const logger = require('./logger');
+
 /**
  * Возвращает все файлы в папке чекпоинтов для коллекции.
  */
@@ -67,7 +69,7 @@ async function loadLatestCheckpoint(checkpointsDir, collectionName) {
         const fullPath = path.join(checkpointsDir, metaFile);
         try {
             await fs.access(fullPath);
-            console.warn(`[Checkpoint] ⚠ Ошибка чтения мета-чекпоинта (битый файл): ${fullPath}\n${e.stack || e.message}`);
+            logger.warn(`[Checkpoint] ⚠ Ошибка чтения мета-чекпоинта (битый файл): ${fullPath}\n${e.stack || e.message}`);
         } catch {
             // Если файла нет — тишина
         }
@@ -83,7 +85,7 @@ async function loadLatestCheckpoint(checkpointsDir, collectionName) {
             const fullPath = path.join(checkpointsDir, segFile);
             try {
                 await fs.access(fullPath);
-                console.warn(`[Checkpoint] ⚠ Ошибка чтения data-сегмента (битый файл): ${fullPath}\n${e.stack || e.message}`);
+                logger.warn(`[Checkpoint] ⚠ Ошибка чтения data-сегмента (битый файл): ${fullPath}\n${e.stack || e.message}`);
             } catch {
                 // Если файла нет — тишина
             }
@@ -103,9 +105,9 @@ async function loadLatestCheckpoint(checkpointsDir, collectionName) {
 
     // Явное логгирование для дебага
     if (metaFile && dataSegmentFiles.length) {
-        console.log(`[Checkpoint] Загружен checkpoint: meta: ${metaFile}, data-сегментов: ${dataSegmentFiles.length} (docs: ${documents.size})`);
+        logger.log(`[Checkpoint] Загружен checkpoint: meta: ${metaFile}, data-сегментов: ${dataSegmentFiles.length} (docs: ${documents.size})`);
     } else {
-        console.warn(`[Checkpoint] Checkpoint files не найдены для коллекции: ${collectionName}`);
+        logger.warn(`[Checkpoint] Checkpoint files не найдены для коллекции: ${collectionName}`);
     }
 
     return {
@@ -127,7 +129,7 @@ async function cleanupOldCheckpoints(checkpointsDir, collectionName, keep = 5) {
             try {
                 await fs.unlink(path.join(checkpointsDir, f));
             } catch (e) {
-                console.warn(`[Checkpoint] Не удалось удалить meta checkpoint: ${f} — ${e.stack || e.message}`);
+                logger.warn(`[Checkpoint] Не удалось удалить meta checkpoint: ${f} — ${e.stack || e.message}`);
             }
         }
     }
@@ -149,7 +151,7 @@ async function cleanupOldCheckpoints(checkpointsDir, collectionName, keep = 5) {
             try {
                 await fs.unlink(path.join(checkpointsDir, f));
             } catch (e) {
-                console.warn(`[Checkpoint] Не удалось удалить data checkpoint: ${f} — ${e.stack || e.message}`);
+                logger.warn(`[Checkpoint] Не удалось удалить data checkpoint: ${f} — ${e.stack || e.message}`);
             }
         }
     }

@@ -1,6 +1,7 @@
 // storage-utils.js
 const fs = require('fs/promises');
 const path = require('path');
+const logger = require('./logger');
 
 /**
  * Проверяет, существует ли указанный путь (файл или директория).
@@ -14,7 +15,7 @@ async function pathExists(filePath) {
     } catch (err) {
         if (err.code === 'ENOENT') return false;
         // ASSUMPTION: Для других ошибок (например, отказано в доступе) возвращаем false, но логируем.
-        console.warn(`[StorageUtils] Предупреждение: путь "${filePath}" не доступен (${err.code}).`);
+        logger.warn(`[StorageUtils] Предупреждение: путь "${filePath}" не доступен (${err.code}).`);
         return false;
     }
 }
@@ -30,7 +31,7 @@ async function ensureDirectoryExists(dirPath) {
     } catch (err) {
         if (err.code !== 'EEXIST') {
             // ASSUMPTION: Ошибка создания директории критична, пробрасываем ошибку.
-            console.error(`[StorageUtils] Ошибка создания директории "${dirPath}": ${err.message}`);
+            logger.error(`[StorageUtils] Ошибка создания директории "${dirPath}": ${err.message}`);
             throw err;
         }
     }
@@ -57,23 +58,23 @@ async function writeJsonFileSafe(filePath, data, jsonIndent = null) {
             await fs.rename(tmpPath, filePath);
         } catch (err) {
             // ASSUMPTION: Если переименование не удалось — пробуем удалить tmp-файл, бросаем ошибку выше.
-            console.error(`[StorageUtils] Ошибка переименования tmp-файла "${tmpPath}" -> "${filePath}": ${err.message}`);
+            logger.error(`[StorageUtils] Ошибка переименования tmp-файла "${tmpPath}" -> "${filePath}": ${err.message}`);
             try {
                 await fs.unlink(tmpPath);
             } catch (unlinkErr) {
                 // Если не смогли удалить tmp-файл — только логируем, не бросаем ошибку повторно.
-                console.warn(`[StorageUtils] Не удалось удалить tmp-файл после сбоя rename "${tmpPath}": ${unlinkErr.message}`);
+                logger.warn(`[StorageUtils] Не удалось удалить tmp-файл после сбоя rename "${tmpPath}": ${unlinkErr.message}`);
             }
             throw err;
         }
     } catch (err) {
         // ASSUMPTION: Любая ошибка на любом этапе считается критичной, пробрасываем наружу.
-        console.error(`[StorageUtils] Ошибка записи JSON в "${filePath}": ${err.message}`);
+        logger.error(`[StorageUtils] Ошибка записи JSON в "${filePath}": ${err.message}`);
         if (await pathExists(tmpPath)) {
             try {
                 await fs.unlink(tmpPath);
             } catch (unlinkErr) {
-                console.warn(`[StorageUtils] Не удалось удалить tmp-файл "${tmpPath}": ${unlinkErr.message}`);
+                logger.warn(`[StorageUtils] Не удалось удалить tmp-файл "${tmpPath}": ${unlinkErr.message}`);
             }
         }
         throw err;
@@ -93,13 +94,13 @@ async function readJsonFile(filePath) {
             return JSON.parse(raw);
         } catch (parseErr) {
             // ASSUMPTION: Повреждённый JSON-файл — это критическая ошибка.
-            console.error(`[StorageUtils] Ошибка парсинга JSON-файла "${filePath}": ${parseErr.message}`);
+            logger.error(`[StorageUtils] Ошибка парсинга JSON-файла "${filePath}": ${parseErr.message}`);
             throw parseErr;
         }
     } catch (err) {
         if (err.code === 'ENOENT') return null;
         // ASSUMPTION: Ошибки чтения кроме ENOENT критичны, пробрасываем дальше.
-        console.error(`[StorageUtils] Ошибка чтения JSON-файла "${filePath}": ${err.message}`);
+        logger.error(`[StorageUtils] Ошибка чтения JSON-файла "${filePath}": ${err.message}`);
         throw err;
     }
 }
@@ -117,7 +118,7 @@ async function copyFileSafe(src, dst) {
         await fs.copyFile(src, dst);
     } catch (err) {
         // ASSUMPTION: Ошибка копирования критична, пробрасываем наружу.
-        console.error(`[StorageUtils] Ошибка копирования из "${src}" в "${dst}": ${err.message}`);
+        logger.error(`[StorageUtils] Ошибка копирования из "${src}" в "${dst}": ${err.message}`);
         throw err;
     }
 }
@@ -135,12 +136,12 @@ async function deleteFileIfExists(filePath) {
                 await fs.unlink(filePath);
             } catch (err) {
                 // ASSUMPTION: Неудачное удаление файла не критично для работы системы, только логируем.
-                console.warn(`[StorageUtils] Не удалось удалить файл "${filePath}": ${err.message}`);
+                logger.warn(`[StorageUtils] Не удалось удалить файл "${filePath}": ${err.message}`);
             }
         }
     } catch (err) {
         // ASSUMPTION: Ошибка при проверке существования файла не критична, только логируем.
-        console.warn(`[StorageUtils] Не удалось проверить наличие файла "${filePath}": ${err.message}`);
+        logger.warn(`[StorageUtils] Не удалось проверить наличие файла "${filePath}": ${err.message}`);
     }
 }
 

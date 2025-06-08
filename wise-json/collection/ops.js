@@ -5,7 +5,7 @@
  * Все методы асинхронные и используют очередь с блокировкой.
  */
 const { isAlive } = require('./ttl.js'); 
-
+const logger = require('../logger');
 /**
  * Вставляет один документ.
  * @param {object} doc - Документ для вставки.
@@ -110,7 +110,7 @@ async function update(id, updates) {
   return this._enqueue(async () => {
     // Повторная проверка существования внутри критической секции
     if (!this.documents.has(id)) {
-      // console.warn(`[Ops] Update: Document with id "${id}" not found.`);
+      // logger.warn(`[Ops] Update: Document with id "${id}" not found.`);
       return null; // Или выбросить ошибку, если это предпочтительнее
     }
     const now = new Date().toISOString();
@@ -173,7 +173,7 @@ async function updateMany(queryFn, updates) {
     } catch (error) {
       // Если this.update() выбросил ошибку (например, нарушение уникальности),
       // перевыбрасываем ее, чтобы прервать updateMany и сообщить вызывающей стороне.
-      // console.error(`[Ops] Error updating document ${id} in updateMany. Aborting. Error: ${error.message}`);
+      // logger.error(`[Ops] Error updating document ${id} in updateMany. Aborting. Error: ${error.message}`);
       throw error; 
     }
   }
@@ -256,7 +256,7 @@ async function removeMany(predicate) {
             // 2. Собрать ошибки и вернуть их
             // 3. Прервать removeMany и выбросить первую ошибку
             // Для консистентности с updateMany, лучше прерывать и выбрасывать ошибку:
-            // console.error(`[Ops] Error removing document ${id} in removeMany. Aborting. Error: ${error.message}`);
+            // logger.error(`[Ops] Error removing document ${id} in removeMany. Aborting. Error: ${error.message}`);
             throw error; // Если хотим прерывать по первой ошибке
         }
     }

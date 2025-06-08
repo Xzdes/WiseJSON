@@ -1,5 +1,5 @@
 // wise-json/collection/ttl.js
-
+const logger = require('../logger');
 /**
  * Проверяет, жив ли документ (учитывая expireAt или ttl).
  * ttl — это время жизни в ms с момента createdAt.
@@ -78,7 +78,7 @@ exports.isAlive = isAlive;
 function cleanupExpiredDocs(documents, indexManager) {
     let removedCount = 0;
     if (!(documents instanceof Map)) {
-        // console.warn('[TTL Cleanup] Provided documents is not a Map. Skipping cleanup.');
+        // logger.warn('[TTL Cleanup] Provided documents is not a Map. Skipping cleanup.');
         return removedCount; // Защита, если передан не Map
     }
 
