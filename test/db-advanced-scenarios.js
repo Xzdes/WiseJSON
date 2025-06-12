@@ -4,9 +4,9 @@ const path = require('path');
 const fs = require('fs/promises'); // Используем промисы для асинхронных операций fs
 const assert = require('assert');
 const WiseJSON = require('../wise-json/index.js');
-const { cleanupExpiredDocs } = require('../wise-json/collection/ttl.js'); // Импортируем измененную версию
+const { cleanupExpiredDocs } = require('../wise-json/collection/ttl.js');
 const { getWalPath, initializeWal, appendWalEntry, readWal } = require('../wise-json/wal-manager.js');
-const { loadLatestCheckpoint, cleanupOldCheckpoints } = require('../wise-json/checkpoint-manager.js');
+// loadLatestCheckpoint, cleanupOldCheckpoints будут вызываться неявно через API коллекции
 
 const DB_ROOT_PATH = path.resolve(__dirname, 'db-advanced-test-data');
 const COLLECTION_NAME = 'advanced_tests_col';
@@ -19,7 +19,6 @@ async function cleanUpDbDirectory(dbPath) {
             // console.log(`[Test Cleanup] Directory ${dbPath} removed.`);
         }
     } catch (error) {
-        // Если директории нет, fs.rm выбросит ошибку, это нормально и можно проигнорировать
         if (error.code !== 'ENOENT') {
             console.error(`[Test Cleanup] Error removing directory ${dbPath}:`, error);
         }
@@ -35,7 +34,7 @@ async function testTtlEdgeCases() {
     const dbPath = path.join(DB_ROOT_PATH, 'ttl_edge');
     await cleanUpDbDirectory(dbPath);
 
-    const db = new WiseJSON(dbPath, { ttlCleanupIntervalMs: 20000 }); // Увеличим интервал, чтобы не мешал тесту
+    const db = new WiseJSON(dbPath, { ttlCleanupIntervalMs: 20000 });
     await db.init();
     const col = await db.collection(COLLECTION_NAME);
     await col.initPromise;
@@ -43,32 +42,17 @@ async function testTtlEdgeCases() {
     const now = Date.now();
     const createdAtISO = new Date(now).toISOString();
 
-    // Вставляем документы
-    await col.insert({ _id: 'expired_past', data: 'past', expireAt: now - 10000 }); // Истекший
-    await col.insert({ _id: 'invalid_expire', data: 'invalid', expireAt: 'not-a-date' }); // Невалидная дата, должен остаться
-    await col.insert({ _id: 'ttl_zero', data: 'zero_ttl', ttl: 0, createdAt: new Date(now - 1).toISOString() }); // TTL 0, должен истечь
-    await col.insert({ _id: 'ttl_short', data: 'short_ttl', ttl: 200, createdAt: createdAtISO }); // Короткий TTL
-    await col.insert({ _id: 'normal_doc', data: 'normal' }); // Обычный документ, должен остаться
-    await col.insert({ _id: 'null_expire', data: 'null_expire', expireAt: null }); // expireAt: null, должен остаться
-    await col.insert({ _id: 'undefined_ttl', data: 'undefined_ttl', ttl: undefined, createdAt: createdAtISO }); // ttl: undefined, должен остаться
+    await col.insert({ _id: 'expired_past', data: 'past', expireAt: now - 10000 });
+    await col.insert({ _id: 'invalid_expire', data: 'invalid', expireAt: 'not-a-date' });
+    await col.insert({ _id: 'ttl_zero', data: 'zero_ttl', ttl: 0, createdAt: new Date(now - 1).toISOString() });
+    await col.insert({ _id: 'ttl_short', data: 'short_ttl', ttl: 200, createdAt: createdAtISO });
+    await col.insert({ _id: 'normal_doc', data: 'normal' });
+    await col.insert({ _id: 'null_expire', data: 'null_expire', expireAt: null });
+    await col.insert({ _id: 'undefined_ttl', data: 'undefined_ttl', ttl: undefined, createdAt: createdAtISO });
 
-
-    // Проверяем col.documents.size напрямую до любого cleanup'а
     assert.strictEqual(col.documents.size, 7, 'Initial raw document count in map should be 7');
-
-    // Первый вызов col.count() вызовет cleanupExpiredDocs внутри себя
-    // Ожидаем:
-    // - 'expired_past' удален
-    // - 'ttl_zero' удален
-    // - 'invalid_expire' остался (из-за новой логики isAlive)
-    // - 'ttl_short' остался (еще не истек)
-    // - 'normal_doc' остался
-    // - 'null_expire' остался
-    // - 'undefined_ttl' остался
-    // Итого: 7 - 2 = 5
     assert.strictEqual(await col.count(), 5, 'Count after first cleanup (expired_past, ttl_zero removed)');
 
-    // Проверяем оставшиеся документы
     let docInvalid = await col.getById('invalid_expire');
     assert.ok(docInvalid, 'Document with invalid expireAt should remain after first count');
     let docShort = await col.getById('ttl_short');
@@ -80,38 +64,24 @@ async function testTtlEdgeCases() {
     let docUndefinedTtl = await col.getById('undefined_ttl');
     assert.ok(docUndefinedTtl, 'Document with undefined ttl should remain');
 
-    // Ждем, пока 'ttl_short' истечет
-    await sleep(300); // 200ms TTL + небольшой запас
+    await sleep(300);
+    cleanupExpiredDocs(col.documents, col._indexManager);
 
-    // Явный cleanup для теста (таймер TTL может сработать, а может и нет, в зависимости от точности setTimeout)
-    const removedCount = cleanupExpiredDocs(col.documents, col._indexManager);
-    // console.log(`[TTL Test] Docs removed by explicit cleanup: ${removedCount}`); // Ожидаем 1 (ttl_short)
-
-    // Теперь 'ttl_short' должен быть удален.
-    // Остаются: 'invalid_expire', 'normal_doc', 'null_expire', 'undefined_ttl'
-    // Итого: 5 - 1 = 4
     assert.strictEqual(await col.count(), 4, 'Final count after short TTL expired and explicit cleanup');
 
-    // Финальные проверки для каждого документа
     const docPast = await col.getById('expired_past');
     assert.strictEqual(docPast, null, 'Document with past expireAt should be removed');
-
     docInvalid = await col.getById('invalid_expire');
     assert.ok(docInvalid, 'Document with invalid expireAt should remain');
     assert.strictEqual(docInvalid.data, 'invalid', 'Invalid expireAt data check');
-
     const docTtlZero = await col.getById('ttl_zero');
     assert.strictEqual(docTtlZero, null, 'Document with ttl: 0 should be removed');
-
     const docTtlShortAfterWait = await col.getById('ttl_short');
     assert.strictEqual(docTtlShortAfterWait, null, 'Document with short ttl should be removed after wait');
-    
     docNormal = await col.getById('normal_doc');
     assert.ok(docNormal, 'Normal document should still be there');
-    
     docNullExpire = await col.getById('null_expire');
     assert.ok(docNullExpire, 'Document with null expireAt should still be there after all cleanups');
-
     docUndefinedTtl = await col.getById('undefined_ttl');
     assert.ok(docUndefinedTtl, 'Document with undefined ttl should still be there after all cleanups');
 
@@ -129,34 +99,20 @@ async function testCorruptedWalRecovery() {
     await fs.mkdir(colDir, { recursive: true });
 
     const walPath = getWalPath(colDir, COLLECTION_NAME);
-    await initializeWal(walPath, colDir); // Создает пустой WAL
+    await initializeWal(walPath, colDir);
 
-    // Записываем валидные записи
     await appendWalEntry(walPath, { op: 'INSERT', doc: { _id: 'doc1', name: 'Valid Doc 1', value: 10 } });
     await appendWalEntry(walPath, { op: 'INSERT', doc: { _id: 'doc2', name: 'Valid Doc 2', value: 20 } });
-    // Записываем битую строку
     await fs.appendFile(walPath, 'this is not a valid json line that will be skipped\n', 'utf8');
-    // Еще одна валидная запись после битой
     await appendWalEntry(walPath, { op: 'INSERT', doc: { _id: 'doc3', name: 'Valid Doc 3 After Corrupt', value: 30 } });
-    // Запись на обновление
     await appendWalEntry(walPath, { op: 'UPDATE', id: 'doc1', data: { name: 'Updated Doc 1', value: 15 } });
-    // Запись на удаление
     await appendWalEntry(walPath, { op: 'REMOVE', id: 'doc2' });
 
-
-    // Инициализируем БД, она должна прочитать WAL
-    // Передаем опцию recover, чтобы wal-manager не падал на ошибке, а пропускал битую строку
     const db = new WiseJSON(dbPath, { walReadOptions: { recover: true, strict: false } });
-    await db.init(); // Этот init неявно вызовет col.init, если мы потом вызовем db.collection
-    
+    await db.init();
     const col = await db.collection(COLLECTION_NAME);
-    await col.initPromise; // Это вызовет чтение WAL с опциями из db.options
+    await col.initPromise;
 
-    // Ожидаем:
-    // doc1 - вставлен и обновлен
-    // doc2 - вставлен и удален
-    // doc3 - вставлен
-    // Итого 2 документа (doc1, doc3)
     const count = await col.count();
     assert.strictEqual(count, 2, 'Should recover 2 documents after WAL processing (doc1 updated, doc2 removed, doc3 inserted)');
 
@@ -171,11 +127,6 @@ async function testCorruptedWalRecovery() {
     const doc3 = await col.getById('doc3');
     assert.ok(doc3, 'doc3 (after corruption) should be recovered');
     assert.strictEqual(doc3.name, 'Valid Doc 3 After Corrupt', 'doc3 name check');
-
-
-    // Проверим, что WAL был прочитан с опцией recover (должен быть warning в консоли)
-    // Это сложнее проверить автоматически без мокинга console.warn,
-    // но мы ожидаем правильное количество документов.
 
     await db.close();
     await cleanUpDbDirectory(dbPath);
@@ -199,25 +150,48 @@ async function testIndexEdgeCases() {
     assert.strictEqual(indexes[0].fieldName, 'email', 'Correct index fieldName');
     assert.strictEqual(indexes[0].type, 'standard', 'Index type should be standard');
 
-    // 2. Попытка создать существующий индекс (должна быть ошибка)
-    let errorThrown = false;
+    // 2. Попытка создать существующий идентичный индекс (НЕ должна быть ошибка, должно быть предупреждение)
+    let errorThrownOnDuplicateCreate = false;
     try {
-        await col.createIndex('email'); // Попытка создать такой же
+        await col.createIndex('email', { unique: false }); // Попытка создать такой же
+        // Ошибки не ожидается, если createIndex идемпотентен для идентичных определений
     } catch (e) {
-        assert.ok(e.message.includes('already exists') || e.message.includes('уже существует'), 'Error for duplicate index definition');
-        errorThrown = true;
+        // Этот блок не должен выполняться, если createIndex не бросает ошибку на дубликате
+        errorThrownOnDuplicateCreate = true; 
     }
-    assert.ok(errorThrown, 'Should throw error when creating an existing index definition');
+    // ИЗМЕНЕНИЕ В ТЕСТЕ: Проверяем, что ошибка НЕ была выброшена
+    assert.strictEqual(errorThrownOnDuplicateCreate, false, 'Should NOT throw error when attempting to create an existing identical index definition. A warning should be logged instead.');
     indexes = await col.getIndexes();
-    assert.strictEqual(indexes.length, 1, 'Index count should remain 1 after failed creation');
+    assert.strictEqual(indexes.length, 1, 'Index count should remain 1 after attempting to create an existing identical index');
+
+    // 2.1 Попытка создать индекс с тем же именем, но другим типом (unique: true) - ДОЛЖНА быть ошибка
+    let errorThrownOnTypeChange = false;
+    try {
+        await col.createIndex('email', { unique: true }); // Пытаемся изменить тип существующего
+    } catch (e) {
+        // Ожидаем ошибку, так как IndexManager должен предотвращать смену типа без удаления
+        assert.ok(e.message.toLowerCase().includes('already exists with a different type') || e.message.toLowerCase().includes('уже существует с другим типом'), 'Error message for type change attempt should be specific');
+        errorThrownOnTypeChange = true;
+    }
+    assert.ok(errorThrownOnTypeChange, 'Should throw error when attempting to change the type of an existing index without deleting it first.');
+    indexes = await col.getIndexes(); // Убедимся, что старый индекс остался
+    assert.strictEqual(indexes.length, 1, 'Index count should remain 1 after failed type change');
+    assert.strictEqual(indexes[0].type, 'standard', 'Original index type (standard) should persist after failed type change');
+
 
     // 3. Удаление индекса
     await col.dropIndex('email');
     indexes = await col.getIndexes();
     assert.strictEqual(indexes.length, 0, 'Index should be dropped');
 
-    // 4. Попытка удалить несуществующий индекс (не должно быть ошибки, просто ничего не делает)
-    await col.dropIndex('non_existent_field');
+    // 4. Попытка удалить несуществующий индекс (не должно быть ошибки, просто ничего не делает, но выводится warn)
+    let errorThrownOnDropNonExistent = false;
+    try {
+        await col.dropIndex('non_existent_field');
+    } catch (e) {
+        errorThrownOnDropNonExistent = true;
+    }
+    assert.strictEqual(errorThrownOnDropNonExistent, false, 'Dropping non-existent index should not throw error (a warning is expected).');
     indexes = await col.getIndexes();
     assert.strictEqual(indexes.length, 0, 'Dropping non-existent index should not change index list');
 
@@ -235,18 +209,15 @@ async function testIndexEdgeCases() {
 
 async function testEmptyDbOperations() {
     console.log('  --- Running Empty DB Operations Test ---');
-    const dbPath = path.join(DB_ROOT_PATH, 'empty_db_ops'); // Изменил имя, чтобы не конфликтовать с другими если cleanup не сработает
+    const dbPath = path.join(DB_ROOT_PATH, 'empty_db_ops');
     await cleanUpDbDirectory(dbPath);
 
     const db = new WiseJSON(dbPath);
-    await db.init(); // Важно, чтобы сама директория dbPath была создана, если ее нет
+    await db.init();
 
-    // 1. getCollectionNames для пустой БД (dbPath существует, но в ней нет директорий коллекций)
     const names = await db.getCollectionNames();
     assert.deepStrictEqual(names, [], 'getCollectionNames on empty DB directory should return empty array');
 
-    // 2. Попытка получить несуществующую коллекцию и выполнить операции
-    // WiseJSON создаст директорию для 'non_existent_col' при первом обращении
     const col = await db.collection('non_existent_col');
     await col.initPromise;
 
@@ -258,13 +229,12 @@ async function testEmptyDbOperations() {
     const doc = await col.getById('any_id');
     assert.strictEqual(doc, null, 'getById on empty collection should return null');
 
-    // 3. Создаем еще одну коллекцию, чтобы проверить getCollectionNames
     const col2 = await db.collection('another_col');
-    await col2.initPromise; // Гарантируем создание
-    await col2.insert({_id: 'test'}); // Добавим документ, чтобы коллекция не была пустой при проверке
-    await col2.flushToDisk(); // Сохраним чекпоинт, чтобы директория точно была "заполнена"
+    await col2.initPromise;
+    await col2.insert({_id: 'test'});
+    await col2.flushToDisk();
 
-    const updatedNames = (await db.getCollectionNames()).sort(); // Сортируем для надежного сравнения
+    const updatedNames = (await db.getCollectionNames()).sort();
     assert.deepStrictEqual(updatedNames, ['another_col', 'non_existent_col'].sort(), 'getCollectionNames should list newly created collections');
 
     await db.close();
@@ -274,55 +244,48 @@ async function testEmptyDbOperations() {
 
 async function testSegmentedCheckpointCleanup() {
     console.log('  --- Running Segmented Checkpoint Cleanup Test ---');
-    const dbPath = path.join(DB_ROOT_PATH, 'checkpoint_cleanup_seg'); // Изменил имя
+    const dbPath = path.join(DB_ROOT_PATH, 'checkpoint_cleanup_seg');
     await cleanUpDbDirectory(dbPath);
 
     const dbOptions = {
-        maxSegmentSizeBytes: 50,  // Очень маленький размер сегмента (меньше одного документа)
+        maxSegmentSizeBytes: 50,
         checkpointsToKeep: 2,
-        checkpointIntervalMs: 5 * 60 * 1000, // Большой интервал, чекпоинты вручную
+        checkpointIntervalMs: 5 * 60 * 1000,
     };
     const db = new WiseJSON(dbPath, dbOptions);
     await db.init();
     const col = await db.collection(COLLECTION_NAME);
     await col.initPromise;
 
-    // Вставляем данные
-    for (let i = 0; i < 5; i++) { // Меньше документов, но они должны попасть в разные сегменты из-за размера
+    for (let i = 0; i < 5; i++) {
         await col.insert({ _id: `doc_seg_${i}`, text: `Document segment content part ${i} with enough text to exceed segment size potentially.` });
     }
 
-    // Создаем несколько чекпоинтов вручную
-    // Каждый flushToDisk создает чекпоинт и вызывает compactWal,
-    // а close у коллекции также вызывает flushToDisk.
-    // cleanupOldCheckpoints вызывается внутри flushToDisk неявно после сохранения нового чекпоинта.
-
-    await col.flushToDisk(); // Checkpoint 1 (создан, cleanup еще нечего удалять или удалит 0)
-    await sleep(20); // Разные timestamp
+    await col.flushToDisk();
+    await sleep(20);
     await col.insert({ _id: 'extra_doc_cp2', text: 'Another doc for checkpoint 2' });
-    await col.flushToDisk(); // Checkpoint 2 (создан, cleanup может удалить самый старый, если их > checkpointsToKeep)
+    await col.flushToDisk();
 
     await sleep(20);
     await col.insert({ _id: 'extra_doc_cp3', text: 'Yet another doc for checkpoint 3' });
-    await col.flushToDisk(); // Checkpoint 3 (создан, самый старый из предыдущих (если их было >2) должен удалиться)
+    await col.flushToDisk();
 
     await sleep(20);
     await col.insert({ _id: 'extra_doc_cp4', text: 'Final doc for checkpoint 4' });
-    await col.flushToDisk(); // Checkpoint 4 (создан, ...)
+    await col.flushToDisk();
 
     const checkpointsDir = path.join(dbPath, COLLECTION_NAME, '_checkpoints');
     let files = [];
     try {
         files = await fs.readdir(checkpointsDir);
     } catch (e) {
-        // Если директории нет, это тоже провал для этого теста
         assert.fail(`Checkpoints directory not found: ${checkpointsDir}`);
     }
 
     const metaFiles = files.filter(f => f.startsWith(`checkpoint_meta_${COLLECTION_NAME}_`) && f.endsWith('.json'));
     const dataFiles = files.filter(f => f.startsWith(`checkpoint_data_${COLLECTION_NAME}_`) && f.endsWith('.json'));
 
-    assert.strictEqual(metaFiles.length, dbOptions.checkpointsToKeep, `Should keep ${dbOptions.checkpointsToKeep} meta checkpoint files. Found: ${metaFiles.join(', ')}`);
+    assert.strictEqual(metaFiles.length, dbOptions.checkpointsToKeep, `Should keep ${dbOptions.checkpointsToKeep} meta checkpoint files. Found: ${metaFiles.length} (${metaFiles.join(', ')})`);
 
     const keptTimestamps = new Set(
         metaFiles.map(f => {
@@ -339,7 +302,6 @@ async function testSegmentedCheckpointCleanup() {
         assert.ok(keptTimestamps.has(dataTimestamp), `Data segment ${dataFile} (ts: ${dataTimestamp}) should belong to a kept checkpoint. Kept TS: ${Array.from(keptTimestamps).join(', ')}`);
     }
 
-    // Проверяем, что есть хотя бы один data-сегмент для каждого meta-файла
     const dataFileTimestamps = new Set(
         dataFiles.map(f => {
             const match = f.match(new RegExp(`^checkpoint_data_${COLLECTION_NAME}_(.+)_seg\\d+\\.json$`));
@@ -354,7 +316,6 @@ async function testSegmentedCheckpointCleanup() {
     console.log('  --- Segmented Checkpoint Cleanup Test PASSED ---');
 }
 
-
 async function main() {
     console.log('=== ADVANCED SCENARIOS DB TEST START ===');
     try {
@@ -364,31 +325,29 @@ async function main() {
     try {
         await testTtlEdgeCases();
         await testCorruptedWalRecovery();
-        await testIndexEdgeCases();
+        await testIndexEdgeCases(); // Этот тест был изменен
         await testEmptyDbOperations();
         await testSegmentedCheckpointCleanup();
 
         console.log('=== ADVANCED SCENARIOS DB TEST PASSED SUCCESSFULLY ===');
     } catch (error) {
         console.error('\n🔥 ADVANCED SCENARIOS TEST FAILED:', error);
-        // Не удаляем DB_ROOT_PATH если тесты упали, для отладки
         console.error(`\n❗ Test data was NOT removed for debugging: ${DB_ROOT_PATH}`);
-        process.exit(1);
+        process.exitCode = 1; // Устанавливаем код выхода для run-all-tests.js
+        // Не используем process.exit(1) здесь, чтобы finally выполнился
     } finally {
         // Финальная очистка всей корневой директории тестов, ТОЛЬКО ЕСЛИ ВСЕ ПРОШЛО УСПЕШНО
-        // Если тесты упали, этот блок не выполнится из-за process.exit(1) в catch
-        // Если нужно всегда чистить, можно убрать process.exit(1) и перенести cleanUpDbDirectory сюда.
-        // Однако, для CI лучше оставлять артефакты при падении.
-        if (process.exitCode !== 1) { // Проверяем, не было ли ошибки
-             // await cleanUpDbDirectory(DB_ROOT_PATH);
-             // console.log('[Test Main] Final cleanup of DB_ROOT_PATH skipped for now.');
+        if (process.exitCode !== 1 && !process.env.KEEP_TEST_DATA) { // Проверяем, не было ли ошибки
+             // await cleanUpDbDirectory(DB_ROOT_PATH); // Закомментировано для отладки, если нужно
+             // console.log('[Test Main] Final cleanup of DB_ROOT_PATH skipped as per KEEP_TEST_DATA or if tests failed.');
+        } else if (process.exitCode === 1) {
+            console.log("[Test Main] Tests failed, DB_ROOT_PATH not cleaned up.");
         }
     }
 }
 
-// Запускаем main и обрабатываем возможные ошибки на самом верхнем уровне
 main().catch(err => {
     console.error('\n🔥 UNHANDLED ERROR IN TEST RUNNER (main function level):', err);
     console.error(`\n❗ Test data was NOT removed for debugging: ${DB_ROOT_PATH}`);
-    process.exit(1);
+    process.exitCode = 1; // Устанавливаем код выхода для run-all-tests.js
 });

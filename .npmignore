@@ -2,6 +2,7 @@
 .github/
 .vscode/
 node_modules/
+docs/
 test/
 test_db_data/
 test_db_data_advanced/
