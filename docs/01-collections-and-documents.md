@@ -530,4 +530,3 @@ async function countDocumentsInCollection() {
 countDocumentsInCollection();
 ```
 В следующем разделе мы рассмотрим, как эффективно искать документы с использованием различных методов запросов и индексов.
-```

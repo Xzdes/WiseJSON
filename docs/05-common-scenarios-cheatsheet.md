@@ -333,4 +333,3 @@ userRegistrationWithBalance();
 | Экспорт в CSV                                 | `await col.exportCsv('backup.csv');`                                                  |
 | Импорт из JSON (добавить)                     | `await col.importJson('data.json');` /* или { mode: 'append' } */                   |
 | Импорт из JSON (заменить)                     | `await col.importJson('data.json', { mode: 'replace' });`                           |
-```
