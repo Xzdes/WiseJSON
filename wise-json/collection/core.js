@@ -5,49 +5,56 @@ const fs = require('fs/promises');
 const CollectionEventEmitter = require('./events.js');
 const IndexManager = require('./indexes.js');
 const logger = require('../logger');
-const createCheckpointController = require('./checkpoints.js'); // Функция-фабрика
+const createCheckpointController = require('./checkpoints.js'); 
+
+// --- ИЗМЕНЕНИЕ ЗДЕСЬ: Возвращаем деструктурирующий импорт для walManager ---
 const {
   defaultIdGenerator,
   isNonEmptyString,
-  isPlainObject, // Экспортируем для использования в ops.js через this.isPlainObject
+  isPlainObject, 
   makeAbsolutePath,
-  // flattenDocToCsv здесь не нужен, он используется в data-exchange.js
 } = require('./utils.js');
-const {
+const { // Деструктурируем функции из wal-manager
   initializeWal,
   readWal,
-  getWalPath,
+  getWalPath, // <<<--- Убедимся, что это правильный getWalPath
   compactWal,
-} = require('../wal-manager.js');
-const { loadLatestCheckpoint, cleanupOldCheckpoints } = require('../checkpoint-manager.js');
-const { cleanupExpiredDocs, isAlive } = require('./ttl.js'); // isAlive используется здесь и в query-ops.js
-const { acquireCollectionLock, releaseCollectionLock } = require('./file-lock.js');
-const { createWriteQueue } = require('./queue.js'); // Инициализирует методы очереди на экземпляре
+  // appendWalEntry и writeTransactionBlock тоже можно деструктурировать, если они используются напрямую в core.js
+  // Но _enqueueDataModification вызывает их из walManager, так что это не обязательно
+} = require('../wal-manager.js'); 
+const { // Деструктурируем функции из checkpoint-manager
+  loadLatestCheckpoint, 
+  cleanupOldCheckpoints 
+} = require('../checkpoint-manager.js'); 
+const { // Деструктурируем функции из ttl
+  cleanupExpiredDocs, 
+  isAlive 
+} = require('./ttl.js'); 
+const { // Деструктурируем функции из file-lock
+  acquireCollectionLock, 
+  releaseCollectionLock 
+} = require('./file-lock.js'); 
+const { createWriteQueue } = require('./queue.js'); // Этот может остаться, т.к. используется одна функция
 
-// Импорт модулей с операциями
 const crudOps = require('./ops.js');
 const queryOps = require('./query-ops.js');
 const dataExchangeOps = require('./data-exchange.js');
 
-// Валидация опций коллекции
 function validateCollectionOptions(opts = {}) {
     const defaults = {
-        maxSegmentSizeBytes: 2 * 1024 * 1024, // 2MB
-        checkpointIntervalMs: 5 * 60 * 1000,  // 5 минут
-        ttlCleanupIntervalMs: 60 * 1000,      // 1 минута
-        walForceSync: false, // Относится к опциям ОС при записи, не к блокирующей/неблокирующей записи JS
-        idGenerator: defaultIdGenerator,
+        maxSegmentSizeBytes: 2 * 1024 * 1024, 
+        checkpointIntervalMs: 5 * 60 * 1000,  
+        ttlCleanupIntervalMs: 60 * 1000,      
+        idGenerator: defaultIdGenerator, 
         checkpointsToKeep: 5,
-        maxWalEntriesBeforeCheckpoint: 1000, // 0 или <0 для отключения триггера по кол-ву
-        walReadOptions: { recover: false, strict: false } // Опции для readWal при инициализации
+        maxWalEntriesBeforeCheckpoint: 1000, 
+        walReadOptions: { recover: false, strict: false } 
     };
     const options = { ...defaults, ...opts };
 
-    // Простая валидация типов, можно расширить
     if (typeof options.maxSegmentSizeBytes !== 'number' || options.maxSegmentSizeBytes <= 0) options.maxSegmentSizeBytes = defaults.maxSegmentSizeBytes;
     if (typeof options.checkpointIntervalMs !== 'number' || options.checkpointIntervalMs < 0) options.checkpointIntervalMs = defaults.checkpointIntervalMs;
     if (typeof options.ttlCleanupIntervalMs !== 'number' || options.ttlCleanupIntervalMs <= 0) options.ttlCleanupIntervalMs = defaults.ttlCleanupIntervalMs;
-    if (typeof options.walForceSync !== 'boolean') options.walForceSync = defaults.walForceSync;
     if (typeof options.idGenerator !== 'function') options.idGenerator = defaults.idGenerator;
     if (typeof options.checkpointsToKeep !== 'number' || options.checkpointsToKeep < 1) options.checkpointsToKeep = defaults.checkpointsToKeep;
     if (typeof options.maxWalEntriesBeforeCheckpoint !== 'number' || options.maxWalEntriesBeforeCheckpoint < 0) options.maxWalEntriesBeforeCheckpoint = defaults.maxWalEntriesBeforeCheckpoint;
@@ -73,24 +80,41 @@ class Collection {
     
     this.collectionDirPath = path.resolve(this.dbRootPath, this.name);
     this.checkpointsDir = path.join(this.collectionDirPath, '_checkpoints');
-    this.walPath = getWalPath(this.collectionDirPath, this.name);
+
+    // --- ОТЛАДКА ---
+    // console.log(`[DEBUG Collection Constr] Для коллекции: ${this.name}`);
+    // console.log(`[DEBUG Collection Constr] collectionDirPath: ${this.collectionDirPath}`);
+    // console.log(`[DEBUG Collection Constr] typeof getWalPath (импортированной): ${typeof getWalPath}`);
+    // --- КОНЕЦ ОТЛАДКИ ---
+
+    // Используем деструктурированную getWalPath
+    this.walPath = getWalPath(this.collectionDirPath, this.name); 
+    
+    // --- ОТЛАДКА ---
+    // console.log(`[DEBUG Collection Constr] this.walPath (после вызова getWalPath): ${this.walPath}`);
+    // console.log(`[DEBUG Collection Constr] typeof this.walPath: ${typeof this.walPath}`);
+    if (typeof this.walPath !== 'string') {
+        const errMsg = `[DEBUG CRITICAL] this.walPath НЕ ЯВЛЯЕТСЯ СТРОКОЙ ПОСЛЕ getWalPath для коллекции ${this.name}! Тип: ${typeof this.walPath}, Значение: ${this.walPath}`;
+        console.error(errMsg);
+        throw new Error(errMsg); 
+    }
+    // --- КОНЕЦ ОТЛАДКИ ---
 
     this.documents = new Map();
-    this._idGenerator = this.options.idGenerator;
-    this.isPlainObject = isPlainObject; // Для ops.js
+    this._idGenerator = this.options.idGenerator; 
+    this.isPlainObject = isPlainObject; 
 
     this._emitter = new CollectionEventEmitter(this.name);
     this._indexManager = new IndexManager(this.name);
     
     this._checkpoint = createCheckpointController({
       collectionName: this.name,
-      collectionDirPath: this.collectionDirPath, // Передаем полный путь
+      collectionDirPath: this.collectionDirPath, 
       documents: this.documents,
       options: this.options,
       getIndexesMeta: () => this._indexManager.getIndexesMeta(),
     });
 
-    // Статистика
     this._stats = { 
         inserts: 0, 
         updates: 0, 
@@ -99,17 +123,13 @@ class Collection {
         walEntriesSinceCheckpoint: 0 
     };
 
-    // Состояние
     this._lastCheckpointTimestamp = null;
     this._checkpointTimerId = null;
     this._ttlCleanupTimer = null;
-    this._releaseLock = null; // Функция для освобождения блокировки файла
+    this._releaseLock = null; 
 
-    // Инициализация очереди записи (добавляет методы _enqueue, _processQueue и др. в this)
     createWriteQueue(this);
 
-    // Привязываем методы из внешних модулей к текущему экземпляру
-    // CRUD операции
     this.insert = crudOps.insert.bind(this);
     this.insertMany = crudOps.insertMany.bind(this);
     this.update = crudOps.update.bind(this);
@@ -118,7 +138,6 @@ class Collection {
     this.removeMany = crudOps.removeMany.bind(this);
     this.clear = crudOps.clear.bind(this);
 
-    // Операции чтения
     this.getById = queryOps.getById.bind(this);
     this.getAll = queryOps.getAll.bind(this);
     this.count = queryOps.count.bind(this);
@@ -127,26 +146,17 @@ class Collection {
     this.findByIndexedValue = queryOps.findByIndexedValue.bind(this);
     this.findOneByIndexedValue = queryOps.findOneByIndexedValue.bind(this);
 
-    // Операции импорта/экспорта
     this.exportJson = dataExchangeOps.exportJson.bind(this);
     this.exportCsv = dataExchangeOps.exportCsv.bind(this);
     this.importJson = dataExchangeOps.importJson.bind(this);
     
-    // Асинхронная инициализация
     this.initPromise = this._initialize();
   }
-
-  // --- Внутренние методы для WAL и модификации данных ---
-  // Ранее это было в createWalOps, теперь инкапсулировано в классе
   
-  /**
-   * Применяет запись из WAL к данным в памяти (this.documents и this._indexManager).
-   * @private
-   */
   _applyWalEntryToMemory(entry, emitEvents = true) {
     if (entry.op === 'INSERT') {
         const doc = entry.doc;
-        if (doc) { // Проверка isAlive() была убрана, т.к. вставляем все, TTL сработает позже
+        if (doc) { 
             this.documents.set(doc._id, doc);
             this._indexManager.afterInsert(doc);
             if (emitEvents) this._emitter.emit('insert', doc);
@@ -154,7 +164,7 @@ class Collection {
     } else if (entry.op === 'BATCH_INSERT') {
         const docs = Array.isArray(entry.docs) ? entry.docs : [];
         for (const doc of docs) {
-            if (doc) { // isAlive() убрана
+            if (doc) { 
                 this.documents.set(doc._id, doc);
                 this._indexManager.afterInsert(doc);
                 if (emitEvents) this._emitter.emit('insert', doc);
@@ -163,7 +173,7 @@ class Collection {
     } else if (entry.op === 'UPDATE') {
         const id = entry.id;
         const prevDoc = this.documents.get(id); 
-        if (prevDoc && isAlive(prevDoc)) { // Для UPDATE проверяем, что обновляемый документ "жив"
+        if (prevDoc && isAlive(prevDoc)) { 
             const updatedDoc = { ...prevDoc, ...entry.data };
             this.documents.set(id, updatedDoc);
             this._indexManager.afterUpdate(prevDoc, updatedDoc);
@@ -172,30 +182,23 @@ class Collection {
     } else if (entry.op === 'REMOVE') {
         const id = entry.id;
         const prevDoc = this.documents.get(id);
-        if (prevDoc) { // Удаляем независимо от isAlive, если команда пришла
+        if (prevDoc) { 
             this.documents.delete(id);
             this._indexManager.afterRemove(prevDoc);
             if (emitEvents) this._emitter.emit('remove', prevDoc);
         }
     } else if (entry.op === 'CLEAR') {
-        const allDocs = Array.from(this.documents.values()); // Для корректного обновления индексов
+        const allDocs = Array.from(this.documents.values()); 
         this.documents.clear(); 
         for (const doc of allDocs) {
             this._indexManager.afterRemove(doc);
         }
-        this._indexManager.clearAllData(); // Убедимся, что все данные индексов очищены
+        this._indexManager.clearAllData(); 
         if (emitEvents) this._emitter.emit('clear');
     }
   }
 
-  /**
-   * Основной метод для выполнения операций, модифицирующих данные.
-   * Включает проверки уникальности, запись в WAL, применение в памяти и триггер чекпоинта.
-   * Вызывается из методов в ops.js (insert, update и т.д.) внутри _enqueue.
-   * @private
-   */
   async _enqueueDataModification(entry, opType, getResultFn, extra = {}) {
-    // Проверки уникальности (если применимо и есть indexManager)
     if (this._indexManager) {
         if (opType === 'INSERT') {
             const docToInsert = entry.doc;
@@ -207,7 +210,7 @@ class Collection {
                     if (valueToInsert !== undefined && valueToInsert !== null) {
                         const index = this._indexManager.indexes.get(fieldName);
                         if (index && index.data && index.data.has(valueToInsert)) {
-                            if (index.data.get(valueToInsert) !== docToInsert._id) { // Дубликат
+                            if (index.data.get(valueToInsert) !== docToInsert._id) { 
                                 throw new Error(`Duplicate value '${valueToInsert}' for unique index '${fieldName}' in insert operation`);
                             }
                         }
@@ -234,11 +237,11 @@ class Collection {
                     }
                 }
             }
-        } else if (opType === 'UPDATE') { // Предварительная проверка для UPDATE
+        } else if (opType === 'UPDATE') { 
             const docId = entry.id;
             const updates = entry.data;
             const originalDoc = this.documents.get(docId);
-            if (originalDoc && updates) { // Убедимся, что есть что обновлять и чем
+            if (originalDoc && updates) { 
                 const uniqueIndexesMeta = (this._indexManager.getIndexesMeta() || []).filter(m => m.type === 'unique');
                 for (const idxMeta of uniqueIndexesMeta) {
                     const fieldName = idxMeta.fieldName;
@@ -257,34 +260,39 @@ class Collection {
         }
     }
     
-    // Запись в WAL
-    const walEntryString = JSON.stringify(entry) + '\n';
-    // this.walPath уже содержит полный путь
-    await fs.mkdir(path.dirname(this.walPath), { recursive: true }); // Убедимся, что директория существует
-    await fs.appendFile(this.walPath, walEntryString, 'utf8');
+    // Используем appendWalEntry ИЗ ДЕСТРУКТУРИРОВАННОГО ИМПОРТА
+    // или walManager.appendWalEntry, если импортировали объект целиком.
+    // Поскольку мы вернулись к деструктуризации, используем просто appendWalEntry.
+    // Но appendWalEntry теперь не принимает collectionOptions.
+    await require('../wal-manager.js').appendWalEntry(this.walPath, entry); // Явный вызов, чтобы избежать проблем с this в walManager
+    // Либо, если мы деструктурировали: await appendWalEntry(this.walPath, entry);
 
-    // Применение в памяти
-    this._applyWalEntryToMemory(entry, true); // true - эмитить события
-
-    // Триггер чекпоинта по количеству записей WAL
-    this._handlePotentialCheckpointTrigger(entry); 
+    this._applyWalEntryToMemory(entry, true); 
+    this._handlePotentialCheckpointTrigger(); // Убрал entry отсюда 
     
-    // Формирование результата
-    let prevResult = undefined; // Для getResultFn, если ей нужен prev
     let nextResult = undefined;
-
     if (opType === 'INSERT') nextResult = entry.doc;
     else if (opType === 'BATCH_INSERT') nextResult = entry.docs;
-    else if (opType === 'UPDATE') nextResult = this.documents.get(entry.id); // Обновленный документ
-    // Для REMOVE/CLEAR результат обычно boolean, формируемый getResultFn
+    else if (opType === 'UPDATE') nextResult = this.documents.get(entry.id); 
 
-    return getResultFn ? getResultFn(prevResult, nextResult) : undefined;
+    return getResultFn ? getResultFn(undefined, nextResult) : undefined;
   }
 
-  // --- Инициализация и управление жизненным циклом ---
   async _initialize() {
     await fs.mkdir(this.collectionDirPath, { recursive: true });
-    await fs.mkdir(this.checkpointsDir, { recursive: true }); // Убедимся, что директория чекпоинтов создана
+    await fs.mkdir(this.checkpointsDir, { recursive: true }); 
+    
+    // --- ОТЛАДКА ---
+    // console.log(`[DEBUG _initialize] Для коллекции: ${this.name}`);
+    // console.log(`[DEBUG _initialize] Перед initializeWal. this.walPath: ${this.walPath}, typeof: ${typeof this.walPath}`);
+    if (typeof this.walPath !== 'string') {
+        const errMsg = `[DEBUG CRITICAL] this.walPath НЕ ЯВЛЯЕТСЯ СТРОКОЙ ПЕРЕД initializeWal для ${this.name}! Тип: ${typeof this.walPath}`;
+        console.error(errMsg);
+        throw new Error(errMsg);
+    }
+    // --- КОНЕЦ ОТЛАДКИ ---
+    
+    // Используем деструктурированную initializeWal
     await initializeWal(this.walPath, this.collectionDirPath);
 
     const loadedCheckpoint = await loadLatestCheckpoint(this.checkpointsDir, this.name);
@@ -295,34 +303,33 @@ class Collection {
     for (const indexMeta of loadedCheckpoint.indexesMeta || []) {
         try {
             this._indexManager.createIndex(indexMeta.fieldName, { unique: indexMeta.type === 'unique' });
-        } catch (e) {
-            // logger.warn(`[WiseJSON] Failed to restore index '${indexMeta.fieldName}' for collection '${this.name}': ${e.message}`);
-        }
+        } catch (e) { /* Ошибки создания индекса при восстановлении уже обработаны в IndexManager */ }
     }
-
-    const walEntries = await readWal(this.walPath, loadedCheckpoint.timestamp, this.options.walReadOptions);
-    if (walEntries.length > 0) {
-    //   logger.log(`[WiseJSON] Applying ${walEntries.length} WAL entries for collection: ${this.name}`);
-    }
+    
+    const walReadOptsWithLoadFlag = {...this.options.walReadOptions, isInitialLoad: true };
+    // Используем деструктурированную readWal
+    const walEntries = await readWal(this.walPath, loadedCheckpoint.timestamp, walReadOptsWithLoadFlag);
+    
     for (const entry of walEntries) {
-      if (entry.txn === 'op' && entry._txn_applied) { // Транзакционные операции
+      if (entry.txn === 'op' && entry._txn_applied_from_wal) { 
         await this._applyTransactionWalOp(entry);
-      } else if (!entry.txn) { // Обычные операции
-        this._applyWalEntryToMemory(entry, false); // false - не эмитить события при инициализации
+      } else if (!entry.txn) { 
+        this._applyWalEntryToMemory(entry, false); 
       }
     }
 
-    this._stats.walEntriesSinceCheckpoint = 0; // Сбрасываем после восстановления
-    this._indexManager.rebuildIndexesFromData(this.documents); // Важно перестроить индексы после всех загрузок
+    this._stats.walEntriesSinceCheckpoint = 0; 
+    this._indexManager.rebuildIndexesFromData(this.documents); 
     
     this._startCheckpointTimer();
     this._startTtlCleanupTimer();
     this._lastCheckpointTimestamp = loadedCheckpoint.timestamp || null;
-    return true; // Для разрешения initPromise
+    this._emitter.emit('initialized');
+    return true; 
   }
 
   async _acquireLock() {
-    if (this._releaseLock) return;
+    if (this._releaseLock) return; 
     this._releaseLock = await acquireCollectionLock(this.collectionDirPath);
   }
 
@@ -334,14 +341,13 @@ class Collection {
   }
 
   _startCheckpointTimer() {
-    this.stopCheckpointTimer();
+    this.stopCheckpointTimer(); 
     if (this.options.checkpointIntervalMs > 0) {
         this._checkpointTimerId = setInterval(async () => {
             try {
-                // logger.log(`[WiseJSON] Auto-checkpoint triggered by timer for collection: ${this.name}`);
                 await this.flushToDisk();
             } catch (e) {
-                logger.error(`[WiseJSON] Error during auto-checkpoint for ${this.name}:`, e);
+                logger.error(`[Collection] Ошибка авто-чекпоинта для ${this.name}: ${e.message}`, e.stack);
             }
         }, this.options.checkpointIntervalMs);
     }
@@ -355,17 +361,13 @@ class Collection {
   }
 
   _startTtlCleanupTimer() {
-    this._stopTtlCleanupTimer();
+    this._stopTtlCleanupTimer(); 
     if (this.options.ttlCleanupIntervalMs > 0) {
         this._ttlCleanupTimer = setInterval(() => {
-            // Запускаем в try/catch, чтобы ошибка в cleanup не остановила таймер
             try {
-                const removed = cleanupExpiredDocs(this.documents, this._indexManager);
-                if (removed > 0) {
-                //   logger.log(`[WiseJSON] [TTL] Auto-cleanup: removed ${removed} documents (collection: ${this.name})`);
-                }
+                const removedCount = cleanupExpiredDocs(this.documents, this._indexManager);
             } catch (e) {
-                logger.error(`[WiseJSON] [TTL] Error during auto-cleanup for ${this.name}:`, e);
+                logger.error(`[Collection] [TTL] Ошибка авто-очистки TTL для ${this.name}: ${e.message}`, e.stack);
             }
         }, this.options.ttlCleanupIntervalMs);
     }
@@ -378,42 +380,35 @@ class Collection {
     }
   }
   
-  _handlePotentialCheckpointTrigger(walEntry) {
+  _handlePotentialCheckpointTrigger() { 
     this._stats.walEntriesSinceCheckpoint++;
     if (this.options.maxWalEntriesBeforeCheckpoint > 0 &&
         this._stats.walEntriesSinceCheckpoint >= this.options.maxWalEntriesBeforeCheckpoint) {
-        // logger.log(`[WiseJSON] Auto-checkpoint triggered by WAL entry count for collection: ${this.name}`);
-        this.flushToDisk().catch(e => { // Запускаем асинхронно, чтобы не блокировать текущую операцию
-            logger.error(`[WiseJSON] Error during WAL-triggered checkpoint for ${this.name}:`, e);
+        this.flushToDisk().catch(e => { 
+            logger.error(`[Collection] Ошибка авто-чекпоинта (по кол-ву WAL) для ${this.name}: ${e.message}`, e.stack);
         });
     }
   }
 
   async flushToDisk() {
-    // В реальном приложении, если flushToDisk вызывается очень часто,
-    // это может привести к конкуренции за блокировку.
-    // Очередь _enqueue должна это обрабатывать, если flushToDisk также ставится в очередь.
-    // Но flushToDisk - это скорее административная операция.
-    // Для безопасности добавим блокировку прямо здесь.
     await this._acquireLock();
     try {
-        cleanupExpiredDocs(this.documents, this._indexManager); // Очищаем TTL перед сохранением
-        const checkpointResult = await this._checkpoint.saveCheckpoint(); // Сохраняем актуальное состояние
+        cleanupExpiredDocs(this.documents, this._indexManager); 
+        const checkpointResult = await this._checkpoint.saveCheckpoint(); 
         
         let newTimestamp = null;
         if (checkpointResult && checkpointResult.meta && checkpointResult.meta.timestamp) {
             newTimestamp = checkpointResult.meta.timestamp;
         }
         this._lastCheckpointTimestamp = newTimestamp || new Date().toISOString();
-        this._stats.walEntriesSinceCheckpoint = 0; // Сбрасываем счетчик
+        this._stats.walEntriesSinceCheckpoint = 0; 
 
-        await compactWal(this.walPath, this._lastCheckpointTimestamp); // Компактируем WAL
+        // Используем деструктурированную compactWal
+        await compactWal(this.walPath, this._lastCheckpointTimestamp); 
         
         if (this.options.checkpointsToKeep > 0) {
             await cleanupOldCheckpoints(this.checkpointsDir, this.name, this.options.checkpointsToKeep);
         }
-        
-        // logger.log(`[WiseJSON] Flushed to disk for collection: ${this.name}`);
         return checkpointResult;
     } finally {
         await this._releaseLockIfHeld();
@@ -423,44 +418,38 @@ class Collection {
   async close() {
     this.stopCheckpointTimer();
     this._stopTtlCleanupTimer();
-    await this.flushToDisk(); // Финальное сохранение
-    // logger.log(`[WiseJSON] Closed collection: ${this.name} (final flush complete)`);
+    await this.flushToDisk(); 
   }
 
   stats() {
-    cleanupExpiredDocs(this.documents, this._indexManager); // Актуализируем перед отдачей статистики
+    cleanupExpiredDocs(this.documents, this._indexManager); 
     return {
       inserts: this._stats.inserts,
       updates: this._stats.updates,
       removes: this._stats.removes,
       clears: this._stats.clears,
-      count: Array.from(this.documents.values()).filter(doc => isAlive(doc)).length,
+      count: this.documents.size, 
       walEntriesSinceCheckpoint: this._stats.walEntriesSinceCheckpoint,
     };
   }
 
-  // --- Методы управления индексами ---
   async createIndex(fieldName, options = {}) {
-    return this._enqueue(async () => { // Операции с индексами должны быть в очереди
+    return this._enqueue(async () => { 
         this._indexManager.createIndex(fieldName, options);
         this._indexManager.rebuildIndexesFromData(this.documents);
-        // logger.log(`[WiseJSON] Created index on field '${fieldName}' (collection: ${this.name})`);
-        // Последующий flushToDisk сохранит метаданные индексов в чекпоинт
     });
   }
 
   async dropIndex(fieldName) {
     return this._enqueue(async () => {
         this._indexManager.dropIndex(fieldName);
-        // logger.log(`[WiseJSON] Dropped index on field '${fieldName}' (collection: ${this.name})`);
     });
   }
 
   async getIndexes() {
-    return this._indexManager.getIndexesMeta(); // Чтение, не требует очереди
+    return this._indexManager.getIndexesMeta(); 
   }
 
-  // --- Методы для работы с событиями ---
   on(eventName, listener) {
     this._emitter.on(eventName, listener);
   }
@@ -469,17 +458,15 @@ class Collection {
     this._emitter.off(eventName, listener);
   }
 
-  // --- Внутренние методы для применения транзакционных операций ---
-  // Вызываются из TransactionManager или при восстановлении WAL (_initialize)
-  // Не используют _enqueue, т.к. работают в контексте уже существующей транзакции или восстановления
   async _applyTransactionWalOp(entry) {
+    const txidForLog = entry.txid || entry.id || 'unknown_txid';
     switch (entry.type) {
-      case 'insert': await this._applyTransactionInsert(entry.args[0], entry.txid); break;
-      case 'insertMany': await this._applyTransactionInsertMany(entry.args[0], entry.txid); break;
-      case 'update': await this._applyTransactionUpdate(entry.args[0], entry.args[1], entry.txid); break;
-      case 'remove': await this._applyTransactionRemove(entry.args[0], entry.txid); break;
-      case 'clear': await this._applyTransactionClear(entry.txid); break;
-      default: logger.warn(`[WiseJSON] Unknown transaction WAL op type in collection ${this.name}: ${entry.type}`);
+      case 'insert': await this._applyTransactionInsert(entry.args[0], txidForLog); break;
+      case 'insertMany': await this._applyTransactionInsertMany(entry.args[0], txidForLog); break;
+      case 'update': await this._applyTransactionUpdate(entry.args[0], entry.args[1], txidForLog); break;
+      case 'remove': await this._applyTransactionRemove(entry.args[0], txidForLog); break;
+      case 'clear': await this._applyTransactionClear(txidForLog); break;
+      default: logger.warn(`[Collection] Неизвестный тип транзакционной WAL-операции '${entry.type}' для ${this.name}, txid: ${txidForLog}`);
     }
   }
   async _applyTransactionInsert(docData, txid) {
@@ -509,10 +496,9 @@ class Collection {
   async _applyTransactionUpdate(id, updates, txid) {
     const oldDoc = this.documents.get(id);
     if (!oldDoc) return null;
-    // Убедимся, что не обновляем системные поля напрямую, кроме updatedAt
-    const { _id, createdAt, _txn, ...restOfUpdates } = updates;
+    const { _id, createdAt, _txn, ...restOfUpdates } = updates; 
     const now = new Date().toISOString();
-    const newDoc = { ...oldDoc, ...restOfUpdates, updatedAt: now, _txn: txid };
+    const newDoc = { ...oldDoc, ...restOfUpdates, updatedAt: updates.updatedAt || now, _txn: txid }; 
     this.documents.set(id, newDoc);
     this._indexManager.afterUpdate(oldDoc, newDoc);
     this._stats.updates++;
@@ -528,13 +514,13 @@ class Collection {
     this._emitter.emit('remove', doc);
     return true;
   }
-  async _applyTransactionClear(txid) {
+  async _applyTransactionClear(txid) { 
     const allDocs = Array.from(this.documents.values());
     this.documents.clear();
     for (const doc of allDocs) {
       this._indexManager.afterRemove(doc);
     }
-    this._indexManager.clearAllData(); // Убедимся, что все очищено
+    this._indexManager.clearAllData(); 
     this._stats.clears++;
     this._stats.inserts = 0; this._stats.updates = 0; this._stats.removes = 0;
     this._stats.walEntriesSinceCheckpoint = 0;
