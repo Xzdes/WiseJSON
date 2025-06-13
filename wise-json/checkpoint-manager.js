@@ -5,14 +5,6 @@ const fs = require('fs/promises');
 const { cleanupExpiredDocs } = require('./collection/ttl.js'); 
 const logger = require('./logger'); 
 
-/**
- * Возвращает все файлы чекпоинтов (meta или data) для указанной коллекции,
- * отсортированные по имени (что обычно означает по времени).
- * @param {string} checkpointsDir - Директория, где хранятся чекпоинты.
- * @param {string} collectionName - Имя коллекции.
- * @param {string} type - 'meta' или 'data'.
- * @returns {Promise<string[]>} - Массив имен файлов.
- */
 async function getCheckpointFiles(checkpointsDir, collectionName, type = 'meta') {
     let files = [];
     try {
@@ -20,86 +12,98 @@ async function getCheckpointFiles(checkpointsDir, collectionName, type = 'meta')
             await fs.access(checkpointsDir);
         } catch (accessError) {
             if (accessError.code === 'ENOENT') {
-                // logger.debug(`[Checkpoint] Директория чекпоинтов ${checkpointsDir} не найдена при попытке получить файлы типа '${type}'. Возвращаем пустой список.`);
                 return []; 
             }
             throw accessError; 
         }
-        
         files = await fs.readdir(checkpointsDir);
     } catch (e) {
         if (e.code === 'ENOENT') {
-            // logger.debug(`[Checkpoint] Ошибка ENOENT при чтении директории ${checkpointsDir} (возможно, была удалена конкурентно). Возвращаем пустой список.`);
             return [];
         }
         logger.error(`[Checkpoint] Ошибка чтения директории чекпоинтов ${checkpointsDir}: ${e.message}`);
         throw e; 
     }
-
     return files
         .filter(f => f.startsWith(`checkpoint_${type}_${collectionName}_`) && f.endsWith('.json'))
         .sort(); 
 }
 
 /**
- * Извлекает timestamp из имени meta-файла чекпоинта.
+ * Извлекает "безопасный для файла" timestamp (с дефисами) из имени meta-файла.
  * @param {string} metaFileName 
  * @param {string} collectionName 
- * @returns {string|null}
+ * @returns {string|null} - Timestamp YYYY-MM-DDTHH-mm-ss-SSSZ или null.
  */
 function extractTimestampFromMetaFile(metaFileName, collectionName) {
-    const re = new RegExp(`^checkpoint_meta_${collectionName}_(.+)\\.json$`);
+    const re = new RegExp(`^checkpoint_meta_${collectionName}_([\\dTZ-]+)\\.json$`); 
     const match = metaFileName.match(re);
     return match ? match[1] : null;
 }
 
-
-/**
- * Загружает последний валидный чекпоинт (meta + все его data-сегменты) для коллекции.
- * Возвращает { documents: Map, indexesMeta, timestamp }
- */
 async function loadLatestCheckpoint(checkpointsDir, collectionName) {
     const metaFiles = await getCheckpointFiles(checkpointsDir, collectionName, 'meta');
     
     if (metaFiles.length === 0) {
-        // ИЗМЕНЕНИЕ ЗДЕСЬ: logger.log вместо logger.info
         logger.log(`[Checkpoint] Файлы meta-чекпоинтов для коллекции '${collectionName}' не найдены. Это ожидаемо при первом запуске или если коллекция была очищена/удалена.`);
         return { documents: new Map(), indexesMeta: [], timestamp: null };
     }
 
     for (let i = metaFiles.length - 1; i >= 0; i--) {
         const currentMetaFile = metaFiles[i];
-        const timestamp = extractTimestampFromMetaFile(currentMetaFile, collectionName);
+        const timestampFromFile = extractTimestampFromMetaFile(currentMetaFile, collectionName);
 
-        if (!timestamp) {
-            logger.warn(`[Checkpoint] Не удалось извлечь timestamp из meta-файла '${currentMetaFile}' для коллекции '${collectionName}'. Файл будет пропущен.`);
+        if (!timestampFromFile) {
+            logger.warn(`[Checkpoint] Не удалось извлечь файловый timestamp из meta-файла '${currentMetaFile}' для коллекции '${collectionName}'. Файл будет пропущен.`);
             continue; 
         }
 
         const allDataFilesRaw = await getCheckpointFiles(checkpointsDir, collectionName, 'data');
         const dataSegmentFiles = allDataFilesRaw.filter(f => {
-            const segMatch = f.match(new RegExp(`^checkpoint_data_${collectionName}_${timestamp}_seg\\d+\\.json$`));
+            const segMatch = f.match(new RegExp(`^checkpoint_data_${collectionName}_${timestampFromFile}_seg\\d+\\.json$`));
             return !!segMatch;
         });
 
-        if (dataSegmentFiles.length === 0 && metaFiles.length > 0) { 
-            logger.warn(`[Checkpoint] Для meta-файла '${currentMetaFile}' (timestamp: ${timestamp}) коллекции '${collectionName}' не найдены соответствующие data-сегменты. Чекпоинт пропущен.`);
-            continue;
-        }
-        
-        dataSegmentFiles.sort();
+        // Если есть meta-файл, но для него нет data-сегментов (и это не пустой чекпоинт, который мог бы не иметь data-сегментов,
+        // но такая логика не реализована явно, поэтому ожидаем data-сегменты, если meta есть)
+        // Однако, пустая коллекция может создать meta, но 0 data-сегментов.
+        // Поэтому эту проверку нужно делать аккуратнее.
+        // Если metaContent.documentCount > 0, а dataSegmentFiles.length === 0, тогда это проблема.
+        // Пока оставим как есть, но это место для возможного уточнения.
 
         let metaContent;
         try {
             metaContent = JSON.parse(await fs.readFile(path.join(checkpointsDir, currentMetaFile), 'utf8'));
-            if (metaContent.timestamp !== timestamp) {
-                logger.warn(`[Checkpoint] Timestamp в содержимом meta-файла '${currentMetaFile}' ('${metaContent.timestamp}') не совпадает с timestamp из имени файла ('${timestamp}') для коллекции '${collectionName}'. Чекпоинт пропущен.`);
+            if (!metaContent.timestamp || typeof metaContent.timestamp !== 'string') {
+                logger.warn(`[Checkpoint] Meta-файл '${currentMetaFile}' для коллекции '${collectionName}' не содержит валидного поля 'timestamp'. Чекпоинт пропущен.`);
                 continue;
             }
+            // Сравнение timestamp из имени файла (с дефисами) и из содержимого meta (ISO) не нужно,
+            // если мы доверяем, что они соответствуют одному чекпоинту.
+            // Главное - использовать правильный формат для Date.parse() далее.
+            
         } catch (e) {
             logger.warn(`[Checkpoint] ⚠ Ошибка чтения или парсинга meta-файла чекпоинта '${currentMetaFile}' для коллекции '${collectionName}': ${e.message}. Чекпоинт пропущен.`);
             continue; 
         }
+        
+        // Если meta говорит, что документов 0, а data-сегментов нет - это валидный пустой чекпоинт.
+        if (metaContent.documentCount === 0 && dataSegmentFiles.length === 0) {
+            // logger.debug(`[Checkpoint] Загружен пустой чекпоинт для коллекции '${collectionName}' (ISO ts: ${metaContent.timestamp}).`);
+            cleanupExpiredDocs(new Map()); // Вызов для консистентности, хотя Map пуст
+             return {
+                documents: new Map(),
+                indexesMeta: metaContent.indexesMeta || [],
+                timestamp: metaContent.timestamp 
+            };
+        }
+
+        // Если meta говорит, что есть документы, но data-сегментов нет - это проблема.
+        if (metaContent.documentCount > 0 && dataSegmentFiles.length === 0) {
+            logger.warn(`[Checkpoint] Meta-файл '${currentMetaFile}' (ISO ts: ${metaContent.timestamp}) коллекции '${collectionName}' указывает на ${metaContent.documentCount} документов, но не найдены соответствующие data-сегменты. Чекпоинт пропущен.`);
+            continue;
+        }
+
 
         const documents = new Map();
         let allSegmentsLoadedSuccessfully = true;
@@ -127,13 +131,13 @@ async function loadLatestCheckpoint(checkpointsDir, collectionName) {
         }
 
         if (!allSegmentsLoadedSuccessfully) {
-            logger.warn(`[Checkpoint] Не все data-сегменты для timestamp '${timestamp}' (коллекция '${collectionName}') были успешно загружены. Этот чекпоинт будет пропущен.`);
+            logger.warn(`[Checkpoint] Не все data-сегменты для файлового timestamp '${timestampFromFile}' (ISO ts: ${metaContent.timestamp}, коллекция '${collectionName}') были успешно загружены. Этот чекпоинт будет пропущен.`);
             continue; 
         }
         
         const removedByTtl = cleanupExpiredDocs(documents); 
         if (removedByTtl > 0) {
-            logger.log(`[Checkpoint] [TTL] При загрузке чекпоинта для коллекции '${collectionName}' удалено ${removedByTtl} истекших документов.`);
+            logger.log(`[Checkpoint] [TTL] При загрузке чекпоинта для коллекции '${collectionName}' (ISO ts: ${metaContent.timestamp}) удалено ${removedByTtl} истекших документов.`);
         }
 
         return {
@@ -147,13 +151,6 @@ async function loadLatestCheckpoint(checkpointsDir, collectionName) {
     return { documents: new Map(), indexesMeta: [], timestamp: null };
 }
 
-
-/**
- * Удаляет старые чекпоинты, оставляя только последние N (по количеству meta-файлов).
- * @param {string} checkpointsDir 
- * @param {string} collectionName 
- * @param {number} keep 
- */
 async function cleanupOldCheckpoints(checkpointsDir, collectionName, keep = 5) {
     if (keep <= 0) { 
         logger.warn(`[Checkpoint] cleanupOldCheckpoints вызван с keep <= 0 (${keep}) для коллекции '${collectionName}'. Очистка не будет выполнена.`);
@@ -181,7 +178,7 @@ async function cleanupOldCheckpoints(checkpointsDir, collectionName, keep = 5) {
     }
 
     const dataFilesToRemove = allDataFiles.filter(dataFile => {
-        const match = dataFile.match(new RegExp(`^checkpoint_data_${collectionName}_(.+)_seg\\d+\\.json$`));
+        const match = dataFile.match(new RegExp(`^checkpoint_data_${collectionName}_([\\dTZ-]+)_seg\\d+\\.json$`)); 
         const dataTimestamp = match ? match[1] : null;
         return dataTimestamp && !timestampsToKeep.has(dataTimestamp);
     });
