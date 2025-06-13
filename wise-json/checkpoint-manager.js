@@ -29,12 +29,6 @@ async function getCheckpointFiles(checkpointsDir, collectionName, type = 'meta')
         .sort(); 
 }
 
-/**
- * Извлекает "безопасный для файла" timestamp (с дефисами) из имени meta-файла.
- * @param {string} metaFileName 
- * @param {string} collectionName 
- * @returns {string|null} - Timestamp YYYY-MM-DDTHH-mm-ss-SSSZ или null.
- */
 function extractTimestampFromMetaFile(metaFileName, collectionName) {
     const re = new RegExp(`^checkpoint_meta_${collectionName}_([\\dTZ-]+)\\.json$`); 
     const match = metaFileName.match(re);
@@ -63,13 +57,7 @@ async function loadLatestCheckpoint(checkpointsDir, collectionName) {
             const segMatch = f.match(new RegExp(`^checkpoint_data_${collectionName}_${timestampFromFile}_seg\\d+\\.json$`));
             return !!segMatch;
         });
-
-        // Если есть meta-файл, но для него нет data-сегментов (и это не пустой чекпоинт, который мог бы не иметь data-сегментов,
-        // но такая логика не реализована явно, поэтому ожидаем data-сегменты, если meta есть)
-        // Однако, пустая коллекция может создать meta, но 0 data-сегментов.
-        // Поэтому эту проверку нужно делать аккуратнее.
-        // Если metaContent.documentCount > 0, а dataSegmentFiles.length === 0, тогда это проблема.
-        // Пока оставим как есть, но это место для возможного уточнения.
+        dataSegmentFiles.sort();
 
         let metaContent;
         try {
@@ -78,19 +66,13 @@ async function loadLatestCheckpoint(checkpointsDir, collectionName) {
                 logger.warn(`[Checkpoint] Meta-файл '${currentMetaFile}' для коллекции '${collectionName}' не содержит валидного поля 'timestamp'. Чекпоинт пропущен.`);
                 continue;
             }
-            // Сравнение timestamp из имени файла (с дефисами) и из содержимого meta (ISO) не нужно,
-            // если мы доверяем, что они соответствуют одному чекпоинту.
-            // Главное - использовать правильный формат для Date.parse() далее.
-            
         } catch (e) {
             logger.warn(`[Checkpoint] ⚠ Ошибка чтения или парсинга meta-файла чекпоинта '${currentMetaFile}' для коллекции '${collectionName}': ${e.message}. Чекпоинт пропущен.`);
             continue; 
         }
         
-        // Если meta говорит, что документов 0, а data-сегментов нет - это валидный пустой чекпоинт.
         if (metaContent.documentCount === 0 && dataSegmentFiles.length === 0) {
-            // logger.debug(`[Checkpoint] Загружен пустой чекпоинт для коллекции '${collectionName}' (ISO ts: ${metaContent.timestamp}).`);
-            cleanupExpiredDocs(new Map()); // Вызов для консистентности, хотя Map пуст
+            cleanupExpiredDocs(new Map());
              return {
                 documents: new Map(),
                 indexesMeta: metaContent.indexesMeta || [],
@@ -98,12 +80,10 @@ async function loadLatestCheckpoint(checkpointsDir, collectionName) {
             };
         }
 
-        // Если meta говорит, что есть документы, но data-сегментов нет - это проблема.
         if (metaContent.documentCount > 0 && dataSegmentFiles.length === 0) {
             logger.warn(`[Checkpoint] Meta-файл '${currentMetaFile}' (ISO ts: ${metaContent.timestamp}) коллекции '${collectionName}' указывает на ${metaContent.documentCount} документов, но не найдены соответствующие data-сегменты. Чекпоинт пропущен.`);
             continue;
         }
-
 
         const documents = new Map();
         let allSegmentsLoadedSuccessfully = true;
@@ -166,15 +146,34 @@ async function cleanupOldCheckpoints(checkpointsDir, collectionName, keep = 5) {
         metaFiles.slice(-keep).map(f => extractTimestampFromMetaFile(f, collectionName)).filter(Boolean)
     );
 
-    for (const metaFileToRemove of metaFilesToRemove) {
-        const filePath = path.join(checkpointsDir, metaFileToRemove);
-        try {
-            await fs.unlink(filePath);
-        } catch (err) {
-            if (err.code !== 'ENOENT') { 
-                logger.warn(`[Checkpoint] Не удалось удалить meta-файл чекпоинта '${metaFileToRemove}' (коллекция: ${collectionName}): ${err.message}`);
+    // Retry-логика для удаления файлов
+    const unlinkWithRetry = async (filePath, fileNameForLog) => {
+        let retries = 5; // Количество попыток
+        let currentDelay = 200; // Начальная задержка в мс
+
+        while (retries > 0) {
+            try {
+                await fs.unlink(filePath);
+                return true; // Успешно удалено
+            } catch (err) {
+                if (err.code === 'ENOENT') {
+                    return true; // Файла уже нет, считаем успехом
+                }
+                retries--;
+                if (retries === 0) {
+                    logger.warn(`[Checkpoint] Не удалось удалить файл '${fileNameForLog}' (коллекция: ${collectionName}) после нескольких попыток: ${err.code} - ${err.message}`);
+                    return false; // Не удалось удалить
+                }
+                // logger.debug(`[Checkpoint] Попытка удалить '${fileNameForLog}' не удалась (${err.code}), осталось попыток: ${retries}. Повтор через ${currentDelay}мс.`);
+                await new Promise(resolve => setTimeout(resolve, currentDelay));
+                currentDelay = Math.min(currentDelay * 2, 1000); // Экспоненциальная задержка, но не более 1 секунды
             }
         }
+    };
+
+    for (const metaFileToRemove of metaFilesToRemove) {
+        const filePath = path.join(checkpointsDir, metaFileToRemove);
+        await unlinkWithRetry(filePath, metaFileToRemove);
     }
 
     const dataFilesToRemove = allDataFiles.filter(dataFile => {
@@ -185,13 +184,7 @@ async function cleanupOldCheckpoints(checkpointsDir, collectionName, keep = 5) {
 
     for (const dataFileToRemove of dataFilesToRemove) {
         const filePath = path.join(checkpointsDir, dataFileToRemove);
-        try {
-            await fs.unlink(filePath);
-        } catch (err) {
-            if (err.code !== 'ENOENT') { 
-                logger.warn(`[Checkpoint] Не удалось удалить data-сегмент чекпоинта '${dataFileToRemove}' (коллекция: ${collectionName}): ${err.message}`);
-            }
-        }
+        await unlinkWithRetry(filePath, dataFileToRemove);
     }
 }
 
