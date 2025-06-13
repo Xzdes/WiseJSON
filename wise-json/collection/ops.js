@@ -1,7 +1,7 @@
 // wise-json/collection/ops.js
 
 const { isAlive } = require('./ttl.js'); 
-const logger = require('../logger');
+const logger = require('../logger'); // Убедитесь, что logger импортирован
 
 async function insert(doc) {
   if (!this.isPlainObject(doc)) {
@@ -35,72 +35,66 @@ async function insertMany(docs) {
     }
 
     // Максимальное количество документов в одной WAL-записи BATCH_INSERT.
-    // Это значение можно сделать настраиваемым через опции коллекции, если потребуется.
-    const MAX_DOCS_PER_BATCH_WAL_ENTRY = this.options?.maxDocsPerBatchWalEntry || 1000;
+    // Можно сделать настраиваемым через this.options, если необходимо.
+    const MAX_DOCS_PER_BATCH_WAL_ENTRY = this.options?.maxDocsPerBatchWalEntry || 1000; 
+    // Если в this.options нет maxDocsPerBatchWalEntry, используем 1000 по умолчанию.
 
-    if (docs.length <= MAX_DOCS_PER_BATCH_WAL_ENTRY) {
-        // Если документов немного, обрабатываем как один батч
-        return this._enqueue(async () => {
-            await this._acquireLock(); // Блокировка на всю операцию
-            try {
+    // Вся операция insertMany (включая все чанки) должна быть атомарной
+    // с точки зрения блокировки коллекции, поэтому оборачиваем все в один _enqueue.
+    return this._enqueue(async () => {
+        await this._acquireLock(); // Захватываем блокировку в начале
+        const allInsertedDocs = [];
+        let totalProcessed = 0;
+
+        try {
+            for (let i = 0; i < docs.length; i += MAX_DOCS_PER_BATCH_WAL_ENTRY) {
+                const chunk = docs.slice(i, i + MAX_DOCS_PER_BATCH_WAL_ENTRY);
+                // logger.debug(`[Ops] insertMany: обрабатываем чанк ${i / MAX_DOCS_PER_BATCH_WAL_ENTRY + 1} из ${Math.ceil(docs.length / MAX_DOCS_PER_BATCH_WAL_ENTRY)}, размер: ${chunk.length}`);
+                
                 const now = new Date().toISOString();
-                const preparedDocs = docs.map(doc => ({
+                const preparedChunk = chunk.map(doc => ({
                     ...doc,
                     _id: doc._id || this._idGenerator(),
-                    createdAt: doc.createdAt || now,
+                    createdAt: doc.createdAt || now, // Используем один 'now' для всего чанка
                     updatedAt: now,
                 }));
 
-                const result = await this._enqueueDataModification(
-                    { op: 'BATCH_INSERT', docs: preparedDocs },
+                // Каждая порция (chunk) записывается как отдельная BATCH_INSERT операция в WAL
+                // _enqueueDataModification выполняет запись в WAL и применение в памяти.
+                // Важно: _enqueueDataModification сам по себе не должен вызывать _acquireLock/_releaseLock,
+                // так как мы уже под общей блокировкой.
+                const insertedChunk = await this._enqueueDataModification( // Предполагается, что этот метод не вызывает _acquireLock
+                    { op: 'BATCH_INSERT', docs: preparedChunk },
                     'BATCH_INSERT',
-                    (_prev, insertedDocs) => insertedDocs
+                    (_prev, inserted) => inserted
                 );
-                this._stats.inserts += result.length;
-                return result;
-            } finally {
-                await this._releaseLockIfHeld();
-            }
-        });
-    } else {
-        // Если документов много, разбиваем на чанки
-        // logger.debug(`[Ops] insertMany: разбиваем ${docs.length} документов на чанки по ${MAX_DOCS_PER_BATCH_WAL_ENTRY}`);
-        const allInsertedDocs = [];
-        // Одна общая блокировка на весь процесс чанкинга
-        return this._enqueue(async () => {
-            await this._acquireLock();
-            try {
-                for (let i = 0; i < docs.length; i += MAX_DOCS_PER_BATCH_WAL_ENTRY) {
-                    const chunk = docs.slice(i, i + MAX_DOCS_PER_BATCH_WAL_ENTRY);
-                    const now = new Date().toISOString();
-                    
-                    const preparedChunk = chunk.map(doc => ({
-                        ...doc,
-                        _id: doc._id || this._idGenerator(),
-                        createdAt: doc.createdAt || now,
-                        updatedAt: now,
-                    }));
-
-                    // Каждая порция (chunk) записывается как отдельная BATCH_INSERT операция в WAL
-                    // _enqueueDataModification выполняет запись в WAL и применение в памяти
-                    const insertedChunk = await this._enqueueDataModification(
-                        { op: 'BATCH_INSERT', docs: preparedChunk },
-                        'BATCH_INSERT',
-                        (_prev, inserted) => inserted
-                    );
-                    
+                
+                if (Array.isArray(insertedChunk)) { // Убедимся, что результат - массив
                     allInsertedDocs.push(...insertedChunk);
-                    this._stats.inserts += insertedChunk.length; 
-                    // Нет необходимости в this.insertMany(chunk) рекурсии, т.к. мы уже внутри _enqueue
-                    // и напрямую вызываем _enqueueDataModification для каждого чанка.
+                    this._stats.inserts += insertedChunk.length;
+                    totalProcessed += insertedChunk.length;
+                } else {
+                    // Это не должно произойти, если _enqueueDataModification для BATCH_INSERT возвращает массив
+                    logger.warn(`[Ops] insertMany: _enqueueDataModification для чанка не вернул массив. Чанк пропущен или обработан некорректно.`);
                 }
-                return allInsertedDocs;
-            } finally {
-                await this._releaseLockIfHeld();
             }
-        });
-    }
+            // logger.debug(`[Ops] insertMany: успешно обработано ${totalProcessed} документов из ${docs.length}.`);
+            return allInsertedDocs;
+        } catch (error) {
+            // Если произошла ошибка при обработке любого из чанков (например, нарушение уникальности
+            // которое было проверено внутри _enqueueDataModification, или ошибка записи WAL для чанка),
+            // то вся операция insertMany откатывается (т.к. мы под одним _enqueue).
+            // В текущей реализации _enqueueDataModification сам бросит ошибку, и она будет поймана
+            // обработчиком ошибок в _processQueue, который вызовет task.reject(err).
+            // Поэтому здесь мы просто пробрасываем ошибку дальше.
+            logger.error(`[Ops] insertMany: ошибка во время обработки чанков: ${error.message}. Обработано до ошибки: ${totalProcessed} документов.`);
+            throw error;
+        } finally {
+            await this._releaseLockIfHeld(); // Освобождаем блокировку в конце
+        }
+    });
 }
+
 
 async function update(id, updates) {
   if (typeof id !== 'string' || id.length === 0) {
@@ -136,7 +130,10 @@ async function updateMany(queryFn, updates) {
     throw new Error('updateMany: обновления должны быть объектом.');
   }
 
+  // Собираем ID ДО постановки в очередь, чтобы не итерировать по изменяемой коллекции.
   const idsToUpdate = [];
+  // Эта часть выполняется вне _enqueue, читая текущее состояние this.documents.
+  // Это нормально, так как фактические изменения будут в _enqueue.
   for (const [id, doc] of this.documents.entries()) {
       if (isAlive(doc) && queryFn(doc)) { 
           idsToUpdate.push(id);
@@ -147,30 +144,27 @@ async function updateMany(queryFn, updates) {
     return 0; 
   }
 
-  // Для updateMany лучше выполнять все обновления в одной "транзакции" _enqueue,
-  // чтобы избежать многократных захватов/освобождений блокировки.
-  // Но this.update уже использует _enqueue.
-  // Если мы хотим атомарности для всего updateMany (все или ничего),
-  // то нужна поддержка транзакций на уровне _enqueueDataModification
-  // или явное использование db.beginTransaction().
-  // Текущая реализация (цикл с await this.update()) корректна, но каждая
-  // операция update будет отдельной записью в WAL и отдельной блокировкой.
+  // Все обновления для updateMany выполняются в рамках одного _enqueue вызова
+  // для обеспечения атомарности на уровне всей операции updateMany, если это возможно.
+  // Однако, this.update внутри цикла сам вызывает _enqueue.
+  // Чтобы сделать updateMany по-настоящему атомарным (все или ничего для всех найденных документов),
+  // потребовалась бы другая архитектура для _enqueueDataModification, принимающая массив обновлений.
+  // Текущая реализация делает каждую отдельную операцию update атомарной, но не весь updateMany.
 
-  // Для улучшения (но это более крупное изменение, выходящее за рамки "одного файла"):
-  // Можно было бы собрать все ID и обновления, и передать в специальный
-  // _enqueueDataModification({ op: 'BATCH_UPDATE', updates: [{id, data}, ...] }),
-  // который бы применил их атомарно.
-
-  // Оставляем текущую реализацию, так как она работает и соответствует
-  // принципу "одно изменение за раз" для этой итерации правок.
+  // Оставляем текущую реализацию, где каждое обновление - отдельная операция в очереди.
+  // Это проще, но менее атомарно для всего набора.
   let successfullyUpdatedCount = 0;
-  for (const id of idsToUpdate) {
+  for (const id of idsToUpdate) { // Этот цикл выполнится вне _enqueue
     try {
+      // Каждый this.update будет поставлен в очередь и выполнен последовательно.
       const updatedDoc = await this.update(id, updates); 
       if (updatedDoc) { 
             successfullyUpdatedCount++;
       }
     } catch (error) {
+      // Если один из update падает (например, нарушение уникальности),
+      // то updateMany прерывается здесь, и предыдущие успешные обновления остаются.
+      logger.error(`[Ops] Ошибка при обновлении документа ID '${id}' в updateMany. Прерывание. Ошибка: ${error.message}`);
       throw error; 
     }
   }
@@ -182,12 +176,12 @@ async function remove(id) {
     throw new Error('remove: id должен быть непустой строкой.');
   }
   
-  if (!this.documents.has(id)) { // Оптимизация: быстрая проверка до постановки в очередь
+  if (!this.documents.has(id)) {
     return false;
   }
 
   return this._enqueue(async () => {
-    if (!this.documents.has(id)) { // Повторная проверка внутри критической секции
+    if (!this.documents.has(id)) { 
       return false; 
     }
     
@@ -221,22 +215,21 @@ async function removeMany(predicate) {
         return 0;
     }
 
-    // Аналогично updateMany, для полной атомарности всего removeMany
-    // потребовались бы более глубокие изменения.
-    // Текущая реализация удаляет документы по одному.
     let removedCount = 0;
-    for (const id of idsToRemove) {
+    for (const id of idsToRemove) { // Аналогично updateMany, цикл вне _enqueue
         try {
-            const success = await this.remove(id); 
+            const success = await this.remove(id); // Каждый remove ставится в очередь
             if (success) {
                 removedCount++;
             }
         } catch (error) {
+            logger.error(`[Ops] Ошибка при удалении документа ID '${id}' в removeMany. Прерывание. Ошибка: ${error.message}`);
             throw error; 
         }
     }
     return removedCount;
 }
+
 
 async function clear() {
   return this._enqueue(async () => {

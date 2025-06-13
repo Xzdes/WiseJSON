@@ -148,27 +148,30 @@ async function cleanupOldCheckpoints(checkpointsDir, collectionName, keep = 5) {
 
     // Retry-логика для удаления файлов
     const unlinkWithRetry = async (filePath, fileNameForLog) => {
-        let retries = 5; // Количество попыток
-        let currentDelay = 200; // Начальная задержка в мс
+        let retries = 10; // Увеличено количество попыток
+        let currentDelay = 500; // Увеличена начальная задержка в мс
 
         while (retries > 0) {
             try {
                 await fs.unlink(filePath);
-                return true; // Успешно удалено
+                // logger.debug(`[Checkpoint] Файл '${fileNameForLog}' успешно удален.`); // Опциональный лог успеха
+                return true; 
             } catch (err) {
                 if (err.code === 'ENOENT') {
-                    return true; // Файла уже нет, считаем успехом
+                    // logger.debug(`[Checkpoint] Файл '${fileNameForLog}' уже не существует (ENOENT).`);
+                    return true; 
                 }
                 retries--;
                 if (retries === 0) {
                     logger.warn(`[Checkpoint] Не удалось удалить файл '${fileNameForLog}' (коллекция: ${collectionName}) после нескольких попыток: ${err.code} - ${err.message}`);
-                    return false; // Не удалось удалить
+                    return false; 
                 }
                 // logger.debug(`[Checkpoint] Попытка удалить '${fileNameForLog}' не удалась (${err.code}), осталось попыток: ${retries}. Повтор через ${currentDelay}мс.`);
                 await new Promise(resolve => setTimeout(resolve, currentDelay));
-                currentDelay = Math.min(currentDelay * 2, 1000); // Экспоненциальная задержка, но не более 1 секунды
+                currentDelay = Math.min(currentDelay + 500, 3000); // Увеличиваем задержку, максимум 3 секунды
             }
         }
+        return false; // Если все попытки исчерпаны
     };
 
     for (const metaFileToRemove of metaFilesToRemove) {
