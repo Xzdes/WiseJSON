@@ -228,8 +228,6 @@ const db = new WiseJSON('/путь/к/вашей/бд', {
     recover: true, 
     strict: false
   },
-
-  // walForceSync: false (редко используемая опция, связана с fsync WAL файла, по умолчанию false)
 });
 ```
 
