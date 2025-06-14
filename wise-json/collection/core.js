@@ -437,12 +437,16 @@ class Collection {
     return this._enqueue(async () => { 
         this._indexManager.createIndex(fieldName, options);
         this._indexManager.rebuildIndexesFromData(this.documents);
+        // ИЗМЕНЕНИЕ: Принудительно сохраняем состояние, чтобы метаданные индекса попали в чекпоинт
+        await this.flushToDisk();
     });
   }
 
   async dropIndex(fieldName) {
     return this._enqueue(async () => {
         this._indexManager.dropIndex(fieldName);
+        // ИЗМЕНЕНИЕ: Сохраняем, чтобы удалить метаданные индекса из чекпоинта
+        await this.flushToDisk(); 
     });
   }
 

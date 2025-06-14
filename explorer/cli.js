@@ -7,273 +7,249 @@
 const fs = require('fs');
 const fsAsync = require('fs/promises');
 const path = require('path');
+const readline = require('readline');
 const WiseJSON = require('../wise-json/index.js');
-
 const logger = require('../wise-json/logger');
+const { matchFilter, flattenDocToCsv } = require('../wise-json/collection/utils.js');
 
 const DB_PATH = process.env.WISE_JSON_PATH || path.resolve(process.cwd(), 'wise-json-db-data');
 
-/**
- * Быстрый вывод ошибки и выход
- */
 function prettyError(msg, code = 1) {
-    logger.error('\x1b[31m%s\x1b[0m', msg);
+    if (process.argv.includes('--json-errors')) {
+        process.stderr.write(JSON.stringify({ error: true, message: msg, code }));
+    } else {
+        logger.error(`Error: ${msg}`);
+    }
     process.exit(code);
 }
 
-/**
- * Проверяет существование коллекции (физически на диске)
- */
-function assertCollectionExists(collectionName) {
+async function assertCollectionExists(collectionName) {
     const colPath = path.join(DB_PATH, collectionName);
-    if (!fs.existsSync(colPath)) {
-        prettyError(`Collection "${collectionName}" does not exist.`, 1);
+    try {
+        await fsAsync.access(colPath);
+    } catch {
+        prettyError(`Collection "${collectionName}" does not exist.`);
     }
 }
 
-async function main() {
+async function confirmAction(prompt) {
+    if (process.argv.includes('--force') || process.argv.includes('--yes')) {
+        return true;
+    }
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    return new Promise(resolve => {
+        rl.question(`${prompt} [y/N] `, answer => {
+            rl.close();
+            resolve(answer.toLowerCase() === 'y');
+        });
+    });
+}
+
+async function run() {
     const args = process.argv.slice(2);
     const command = args[0];
 
     if (!command || ['help', '--help', '-h'].includes(command)) {
-        logger.log(`
+        console.log(`
 wisejson-explorer <command> [options]
 
-Commands:
-  list-collections
-      List all collections with document counts.
+Management Commands (require --allow-write):
+  collection-drop <collectionName>       Permanently deletes a collection.
+  doc-insert <collectionName> <json>     Inserts a single document.
+  doc-remove <collectionName> <docId>      Removes a single document by its ID.
+  import-collection <coll> <file>      Imports documents from a JSON file.
+      [--mode append|replace]              - (Default: append)
+  create-index <coll> <field> [--unique] Creates an index on a field.
+  drop-index <coll> <field>              Drops an index from a field.
 
-  show-collection <collectionName> [--limit N] [--offset M] [--sort <field>] [--order asc|desc] [--filter <JSON_string>] [--output json|table|csv] [--file <filename>]
-      Display documents in the specified collection.
+Read-Only Commands:
+  list-collections                       Lists all collections with document counts.
+  show-collection <coll>                 Displays documents in a collection.
+      [--limit N] [--offset M]             - Pagination
+      [--sort <field>] [--order asc|desc]  - Sorting
+      [--filter <JSON_string>]             - Filter documents (e.g., '{"age":{"$gt":25}}')
+      [--output json|table|csv]            - Output format
+  get-document <coll> <docId>              Shows a single document by ID.
+  collection-stats <coll>                Shows collection statistics and indexes.
+  list-indexes <coll>                    Lists indexes for the collection.
+  export-collection <coll> <file>        Exports a collection to a file.
+      [--output json|csv]                  - Output format
 
-  get-document <collectionName> <documentId>
-      Show a single document by ID.
-
-  collection-stats <collectionName>
-      Show collection statistics.
-
-  export-collection <collectionName> <filename> [--output json|csv]
-      Export collection to JSON or CSV file.
-
-  import-collection <collectionName> <filename> [--mode append|replace]
-      Import collection from JSON file.
-
-  list-indexes <collectionName>
-      List indexes for the collection.
-
-  create-index <collectionName> <fieldName> [--unique]
-      Create an index on a field.
-
-  drop-index <collectionName> <fieldName>
-      Drop an index from a field.
-
-Options:
-  --limit N, --offset M, --sort, --order, --filter
-  --output json|csv
-  --file <filename>
-  --mode append|replace
-  --allow-write
+Global Options:
+  --allow-write                          Required for any command that modifies data.
+  --force, --yes                         Skip confirmation prompts for dangerous operations.
+  --json-errors                          Output errors in JSON format.
 `);
-        process.exit(0);
+        return;
     }
 
-    // list-collections
-    if (command === 'list-collections') {
-        const db = new WiseJSON(DB_PATH);
+    const writeCommands = ['collection-drop', 'doc-insert', 'doc-remove', 'import-collection', 'create-index', 'drop-index'];
+    if (writeCommands.includes(command) && !args.includes('--allow-write')) {
+        prettyError(`Write operation "${command}" requires the --allow-write flag.`);
+    }
+
+    const db = new WiseJSON(DB_PATH, {
+        ttlCleanupIntervalMs: 0,
+        checkpointIntervalMs: 0,
+    });
+
+    try {
         await db.init();
-        const collections = await db.getCollectionNames();
-        for (const col of collections) {
-            const collection = await db.collection(col);
-            await collection.initPromise;
-            const count = await collection.count();
-            logger.log(`${col}: ${count} documents`);
-        }
-        process.exit(0);
-    }
-
-    // show-collection <collectionName>
-    if (command === 'show-collection' && args[1]) {
         const collectionName = args[1];
-        assertCollectionExists(collectionName);
-        const db = new WiseJSON(DB_PATH);
-        await db.init();
-        const col = await db.collection(collectionName);
-        await col.initPromise;
 
-        let limit = 10;
-        let offset = 0;
-        let sortField = null;
-        let sortOrder = 'asc';
-        let output = 'json';
-        let filter = null;
-
-        for (let i = 2; i < args.length; i++) {
-            const arg = args[i];
-            if (arg === '--limit' && args[i + 1]) limit = parseInt(args[++i], 10);
-            if (arg === '--offset' && args[i + 1]) offset = parseInt(args[++i], 10);
-            if (arg === '--sort' && args[i + 1]) sortField = args[++i];
-            if (arg === '--order' && args[i + 1]) sortOrder = args[++i];
-            if (arg === '--output' && args[i + 1]) output = args[++i];
-            if (arg === '--filter' && args[i + 1]) filter = args[++i];
-        }
-
-        let docs = await col.getAll();
-        if (filter) {
-            try {
-                const obj = JSON.parse(filter);
-                docs = docs.filter(doc => {
-                    for (const key in obj) {
-                        if (typeof obj[key] === 'object') {
-                            for (const op in obj[key]) {
-                                switch (op) {
-                                    case '$gt': if (!(doc[key] > obj[key][op])) return false; break;
-                                    case '$lt': if (!(doc[key] < obj[key][op])) return false; break;
-                                    case '$gte': if (!(doc[key] >= obj[key][op])) return false; break;
-                                    case '$lte': if (!(doc[key] <= obj[key][op])) return false; break;
-                                    case '$ne': if (doc[key] === obj[key][op]) return false; break;
-                                    case '$in': if (!Array.isArray(obj[key][op]) || !obj[key][op].includes(doc[key])) return false; break;
-                                    case '$nin': if (Array.isArray(obj[key][op]) && obj[key][op].includes(doc[key])) return false; break;
-                                    default: return false;
-                                }
-                            }
-                        } else {
-                            if (doc[key] !== obj[key]) return false;
-                        }
-                    }
-                    return true;
-                });
-            } catch (e) {
-                prettyError('Invalid JSON filter. Try using escaped quotes, e.g.: --filter "{\\"name\\":\\"User5\\"}"');
+        switch (command) {
+            case 'list-collections': {
+                const collections = await db.getCollectionNames();
+                const result = await Promise.all(collections.map(async (name) => {
+                    const col = await db.collection(name);
+                    await col.initPromise;
+                    return { name, count: await col.count() };
+                }));
+                console.table(result);
+                break;
             }
+            case 'doc-insert': {
+                if (!collectionName || !args[2]) prettyError('Usage: doc-insert <collection> <json>');
+                const col = await db.collection(collectionName);
+                await col.initPromise;
+                try {
+                    const doc = JSON.parse(args[2]);
+                    const inserted = await col.insert(doc);
+                    console.log(JSON.stringify(inserted, null, 2));
+                } catch (e) { prettyError(`Failed to insert document: ${e.message}`); }
+                break;
+            }
+            case 'import-collection': {
+                if (!collectionName || !args[2]) prettyError('Usage: import-collection <collection> <file>');
+                const col = await db.collection(collectionName);
+                await col.initPromise;
+                const filename = args[2];
+                const mode = args.includes('--mode') && args[args.indexOf('--mode') + 1] === 'replace' ? 'replace' : 'append';
+                await col.importJson(filename, { mode });
+                logger.log(`Import to "${collectionName}" from ${filename} completed (mode: ${mode}).`);
+                break;
+            }
+            case 'create-index': {
+                if (!collectionName || !args[2]) prettyError('Usage: create-index <collection> <field> [--unique]');
+                const col = await db.collection(collectionName);
+                await col.initPromise;
+                await col.createIndex(args[2], { unique: args.includes('--unique') });
+                logger.log(`Index created on ${collectionName}.${args[2]}`);
+                break;
+            }
+            case 'show-collection': {
+                if (!collectionName) prettyError('Usage: show-collection <collection>');
+                await assertCollectionExists(collectionName);
+                const col = await db.collection(collectionName);
+                await col.initPromise;
+                let limit = 10, offset = 0, sortField = null, sortOrder = 'asc', output = 'json', filter = null;
+                for (let i = 2; i < args.length; i++) {
+                    if (args[i] === '--limit' && args[i + 1]) limit = parseInt(args[++i], 10);
+                    if (args[i] === '--offset' && args[i + 1]) offset = parseInt(args[++i], 10);
+                    if (args[i] === '--sort' && args[i + 1]) sortField = args[++i];
+                    if (args[i] === '--order' && args[i + 1]) sortOrder = args[++i];
+                    if (args[i] === '--output' && args[i + 1]) output = args[++i];
+                    if (args[i] === '--filter' && args[i + 1]) {
+                        try { filter = JSON.parse(args[++i]); } catch (e) { prettyError(`Invalid JSON in filter: ${e.message}`); }
+                    }
+                }
+                let docs = await col.find(filter || (() => true));
+                if (sortField) {
+                    docs.sort((a, b) => {
+                        if (a[sortField] === undefined) return 1; if (b[sortField] === undefined) return -1;
+                        if (a[sortField] < b[sortField]) return sortOrder === 'asc' ? -1 : 1;
+                        if (a[sortField] > b[sortField]) return sortOrder === 'asc' ? 1 : -1;
+                        return 0;
+                    });
+                }
+                docs = docs.slice(offset, offset + limit);
+                if (output === 'json') console.log(JSON.stringify(docs, null, 2));
+                else if (output === 'csv') console.log(flattenDocToCsv(docs));
+                else console.table(docs);
+                break;
+            }
+            case 'get-document': {
+                if (!collectionName || !args[2]) prettyError('Usage: get-document <collection> <docId>');
+                await assertCollectionExists(collectionName);
+                const col = await db.collection(collectionName);
+                await col.initPromise;
+                const doc = await col.getById(args[2]);
+                if (!doc) prettyError(`Document "${args[2]}" not found.`);
+                console.log(JSON.stringify(doc, null, 2));
+                break;
+            }
+            case 'collection-stats': {
+                if (!collectionName) prettyError('Usage: collection-stats <collection>');
+                await assertCollectionExists(collectionName);
+                const col = await db.collection(collectionName);
+                await col.initPromise;
+                const stats = await col.stats();
+                const indexes = await col.getIndexes();
+                console.log("--- Stats ---"); console.table([stats]);
+                console.log("\n--- Indexes ---"); console.table(indexes.length > 0 ? indexes : [{ status: 'No indexes found' }]);
+                break;
+            }
+            case 'list-indexes': {
+                if (!collectionName) prettyError('Usage: list-indexes <collection>');
+                await assertCollectionExists(collectionName);
+                const col = await db.collection(collectionName);
+                await col.initPromise;
+                console.log(JSON.stringify(await col.getIndexes(), null, 2));
+                break;
+            }
+            case 'export-collection': {
+                if (!collectionName || !args[2]) prettyError('Usage: export-collection <collection> <file>');
+                await assertCollectionExists(collectionName);
+                const col = await db.collection(collectionName);
+                await col.initPromise;
+                const filename = args[2];
+                const output = args.includes('--output') && args[args.indexOf('--output') + 1] === 'csv' ? 'csv' : 'json';
+                if (output === 'csv') await col.exportCsv(filename);
+                else await col.exportJson(filename);
+                logger.log(`Collection "${collectionName}" exported to ${filename}`);
+                break;
+            }
+            case 'doc-remove': {
+                if (!collectionName || !args[2]) prettyError('Usage: doc-remove <collection> <docId>');
+                await assertCollectionExists(collectionName);
+                const col = await db.collection(collectionName);
+                await col.initPromise;
+                const success = await col.remove(args[2]);
+                if (!success) prettyError(`Document "${args[2]}" not found.`);
+                logger.log(`Document "${args[2]}" removed.`);
+                break;
+            }
+            case 'drop-index': {
+                if (!collectionName || !args[2]) prettyError('Usage: drop-index <collection> <field>');
+                await assertCollectionExists(collectionName);
+                const col = await db.collection(collectionName);
+                await col.initPromise;
+                await col.dropIndex(args[2]);
+                logger.log(`Index on field "${args[2]}" dropped.`);
+                break;
+            }
+            case 'collection-drop': {
+                if (!collectionName) prettyError('Usage: collection-drop <collection>');
+                await assertCollectionExists(collectionName);
+                if (!(await confirmAction(`Are you sure you want to permanently delete collection "${collectionName}"?`))) {
+                    logger.log('Operation cancelled.');
+                } else {
+                    const collectionPath = path.join(DB_PATH, collectionName);
+                    await fsAsync.rm(collectionPath, { recursive: true, force: true });
+                    logger.log(`Collection "${collectionName}" dropped.`);
+                }
+                break;
+            }
+            default:
+                prettyError(`Unknown command: "${command}"`);
         }
-
-        if (sortField) {
-            docs.sort((a, b) => {
-                if (a[sortField] === undefined) return 1;
-                if (b[sortField] === undefined) return -1;
-                if (a[sortField] < b[sortField]) return sortOrder === 'asc' ? -1 : 1;
-                if (a[sortField] > b[sortField]) return sortOrder === 'asc' ? 1 : -1;
-                return 0;
-            });
+    } finally {
+        if (db) {
+            await db.close();
         }
-
-        docs = docs.slice(offset, offset + limit);
-
-        if (output === 'json') {
-            logger.log(JSON.stringify(docs, null, 2));
-        } else if (output === 'csv') {
-            const { flattenDocToCsv } = require('./utils.js');
-            logger.log(flattenDocToCsv(docs));
-        } else if (output === 'table') {
-            logger.table(docs);
-        }
-
-        process.exit(0);
     }
-
-    // get-document <collectionName> <id>
-    if (command === 'get-document' && args[1] && args[2]) {
-        const collectionName = args[1];
-        assertCollectionExists(collectionName);
-        const db = new WiseJSON(DB_PATH);
-        await db.init();
-        const col = await db.collection(collectionName);
-        await col.initPromise;
-        const doc = await col.getById(args[2]);
-        if (!doc) {
-            prettyError(`Document "${args[2]}" not found in collection "${collectionName}"`, 1);
-        }
-        logger.log(JSON.stringify(doc, null, 2));
-        process.exit(0);
-    }
-
-    // collection-stats <collectionName>
-    if (command === 'collection-stats' && args[1]) {
-        const collectionName = args[1];
-        assertCollectionExists(collectionName);
-        const db = new WiseJSON(DB_PATH);
-        await db.init();
-        const col = await db.collection(collectionName);
-        await col.initPromise;
-        const stats = await col.stats();
-        logger.log(stats);
-        process.exit(0);
-    }
-
-    // export-collection <collectionName> <filename>
-    if (command === 'export-collection' && args[1] && args[2]) {
-        const collectionName = args[1];
-        assertCollectionExists(collectionName);
-        const db = new WiseJSON(DB_PATH);
-        await db.init();
-        const col = await db.collection(collectionName);
-        await col.initPromise;
-        const output = args.includes('--output') ? args[args.indexOf('--output') + 1] : 'json';
-        if (output === 'csv') {
-            await col.exportCsv(args[2]);
-            logger.log(`Exported to ${args[2]}`);
-        } else {
-            await col.exportJson(args[2]);
-        }
-        process.exit(0);
-    }
-
-    // import-collection <collectionName> <filename>
-    if (command === 'import-collection' && args[1] && args[2]) {
-        const collectionName = args[1];
-        const db = new WiseJSON(DB_PATH);
-        await db.init();
-        const col = await db.collection(collectionName);
-        await col.initPromise;
-        const mode = args.includes('--mode') ? args[args.indexOf('--mode') + 1] : 'append';
-        await col.importJson(args[2], { mode });
-        await col.flushToDisk(); // ГАРАНТИРУЕТ создание коллекции на диске!
-        process.exit(0);
-    }
-
-    // list-indexes <collectionName>
-    if (command === 'list-indexes' && args[1]) {
-        const collectionName = args[1];
-        assertCollectionExists(collectionName);
-        const db = new WiseJSON(DB_PATH);
-        await db.init();
-        const col = await db.collection(collectionName);
-        await col.initPromise;
-        logger.log(await col.getIndexes());
-        process.exit(0);
-    }
-
-    // create-index <collectionName> <fieldName>
-    if (command === 'create-index' && args[1] && args[2]) {
-        const collectionName = args[1];
-        assertCollectionExists(collectionName);
-        const fieldName = args[2];
-        const unique = args.includes('--unique');
-        const db = new WiseJSON(DB_PATH);
-        await db.init();
-        const col = await db.collection(collectionName);
-        await col.initPromise;
-        await col.createIndex(fieldName, { unique });
-        logger.log(`Index on field '${fieldName}' created (unique: ${unique}).`);
-        process.exit(0);
-    }
-
-    // drop-index <collectionName> <fieldName>
-    if (command === 'drop-index' && args[1] && args[2]) {
-        const collectionName = args[1];
-        assertCollectionExists(collectionName);
-        const fieldName = args[2];
-        const db = new WiseJSON(DB_PATH);
-        await db.init();
-        const col = await db.collection(collectionName);
-        await col.initPromise;
-        await col.dropIndex(fieldName);
-        logger.log(`Index on field '${fieldName}' dropped.`);
-        process.exit(0);
-    }
-
-    // Если команда не распознана
-    prettyError('Unknown command. Use "help" for usage.', 1);
 }
 
-main();
+run().catch(err => {
+    prettyError(err.message);
+});
