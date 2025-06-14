@@ -8,24 +8,33 @@
 <body>
     <header>
         <h1>WiseJSON Data Explorer</h1>
+        <p id="server-mode" class="server-mode-read-only">Server Mode: Read-Only</p>
     </header>
 
     <main>
-        <section>
-            <label for="collectionSelect">Select Collection:</label>
-            <select id="collectionSelect"></select>
-            <button id="loadBtn">Load</button>
-        </section>
-
-        <section id="filters">
-            <label for="filterName">Filter by Name:</label>
-            <input type="text" id="filterName" placeholder="e.g. User5">
-            <button id="applyFilterBtn">Apply Filter</button>
-        </section>
-
-        <section id="paginationOptions">
-            <label for="pageSizeInput">Rows per page:</label>
-            <input type="number" id="pageSizeInput" min="1" value="10">
+        <section class="controls-grid">
+            <div class="control-group">
+                <label for="collectionSelect">Select Collection:</label>
+                <select id="collectionSelect"></select>
+                <button id="refreshBtn">Refresh</button>
+            </div>
+            <div class="control-group">
+                <label for="filterInput">Filter (JSON):</label>
+                <input type="text" id="filterInput" placeholder='{"age": {"$gt": 25}}'>
+            </div>
+             <div class="control-group">
+                <label for="sortInput">Sort by Field:</label>
+                <input type="text" id="sortInput" placeholder="age">
+                <select id="orderSelect">
+                    <option value="asc">ASC</option>
+                    <option value="desc">DESC</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label for="pageSizeInput">Rows per page:</label>
+                <input type="number" id="pageSizeInput" min="1" value="10">
+            </div>
+            <button id="applyBtn" class="apply-button">Apply Filters & Load</button>
         </section>
 
         <section id="tableContainer">
@@ -36,10 +45,33 @@
         </section>
 
         <section id="pagination">
-            <button id="prevBtn">Previous</button>
-            <button id="nextBtn">Next</button>
+            <button id="prevBtn" disabled>Previous</button>
+            <span id="pageInfo">Page 1</span>
+            <button id="nextBtn" disabled>Next</button>
         </section>
 
+        <hr>
+
+        <section id="index-manager">
+            <h2>Index Management</h2>
+            <div id="index-list">
+                <!-- Список индексов будет здесь -->
+            </div>
+            <div id="create-index-form" class="controls-grid write-op" style="display: none;">
+                <div class="control-group">
+                     <label for="indexFieldInput">Field Name:</label>
+                     <input type="text" id="indexFieldInput" placeholder="e.g., email">
+                </div>
+                 <div class="control-group">
+                    <label for="uniqueCheckbox">Unique:</label>
+                    <input type="checkbox" id="uniqueCheckbox">
+                </div>
+                <button id="createIndexBtn">Create Index</button>
+            </div>
+        </section>
+
+        <hr>
+        
         <section id="viewer">
             <h3>Document Viewer</h3>
             <textarea id="documentViewer" rows="10" readonly></textarea>

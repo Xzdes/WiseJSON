@@ -6,35 +6,31 @@ const CollectionEventEmitter = require('./events.js');
 const IndexManager = require('./indexes.js');
 const logger = require('../logger');
 const createCheckpointController = require('./checkpoints.js'); 
-
-// --- ИЗМЕНЕНИЕ ЗДЕСЬ: Возвращаем деструктурирующий импорт для walManager ---
 const {
   defaultIdGenerator,
   isNonEmptyString,
   isPlainObject, 
   makeAbsolutePath,
 } = require('./utils.js');
-const { // Деструктурируем функции из wal-manager
+const {
   initializeWal,
   readWal,
-  getWalPath, // <<<--- Убедимся, что это правильный getWalPath
+  getWalPath,
   compactWal,
-  // appendWalEntry и writeTransactionBlock тоже можно деструктурировать, если они используются напрямую в core.js
-  // Но _enqueueDataModification вызывает их из walManager, так что это не обязательно
 } = require('../wal-manager.js'); 
-const { // Деструктурируем функции из checkpoint-manager
+const {
   loadLatestCheckpoint, 
   cleanupOldCheckpoints 
 } = require('../checkpoint-manager.js'); 
-const { // Деструктурируем функции из ttl
+const {
   cleanupExpiredDocs, 
   isAlive 
 } = require('./ttl.js'); 
-const { // Деструктурируем функции из file-lock
+const {
   acquireCollectionLock, 
   releaseCollectionLock 
 } = require('./file-lock.js'); 
-const { createWriteQueue } = require('./queue.js'); // Этот может остаться, т.к. используется одна функция
+const { createWriteQueue } = require('./queue.js');
 
 const crudOps = require('./ops.js');
 const queryOps = require('./query-ops.js');
@@ -81,25 +77,8 @@ class Collection {
     this.collectionDirPath = path.resolve(this.dbRootPath, this.name);
     this.checkpointsDir = path.join(this.collectionDirPath, '_checkpoints');
 
-    // --- ОТЛАДКА ---
-    // console.log(`[DEBUG Collection Constr] Для коллекции: ${this.name}`);
-    // console.log(`[DEBUG Collection Constr] collectionDirPath: ${this.collectionDirPath}`);
-    // console.log(`[DEBUG Collection Constr] typeof getWalPath (импортированной): ${typeof getWalPath}`);
-    // --- КОНЕЦ ОТЛАДКИ ---
-
-    // Используем деструктурированную getWalPath
     this.walPath = getWalPath(this.collectionDirPath, this.name); 
     
-    // --- ОТЛАДКА ---
-    // console.log(`[DEBUG Collection Constr] this.walPath (после вызова getWalPath): ${this.walPath}`);
-    // console.log(`[DEBUG Collection Constr] typeof this.walPath: ${typeof this.walPath}`);
-    if (typeof this.walPath !== 'string') {
-        const errMsg = `[DEBUG CRITICAL] this.walPath НЕ ЯВЛЯЕТСЯ СТРОКОЙ ПОСЛЕ getWalPath для коллекции ${this.name}! Тип: ${typeof this.walPath}, Значение: ${this.walPath}`;
-        console.error(errMsg);
-        throw new Error(errMsg); 
-    }
-    // --- КОНЕЦ ОТЛАДКИ ---
-
     this.documents = new Map();
     this._idGenerator = this.options.idGenerator; 
     this.isPlainObject = isPlainObject; 
@@ -130,22 +109,35 @@ class Collection {
 
     createWriteQueue(this);
 
+    // --- Привязка методов к экземпляру ---
+    
+    // CRUD операции
     this.insert = crudOps.insert.bind(this);
     this.insertMany = crudOps.insertMany.bind(this);
     this.update = crudOps.update.bind(this);
-    this.updateMany = crudOps.updateMany.bind(this);
     this.remove = crudOps.remove.bind(this);
     this.removeMany = crudOps.removeMany.bind(this);
     this.clear = crudOps.clear.bind(this);
 
+    // Базовые методы запросов
     this.getById = queryOps.getById.bind(this);
     this.getAll = queryOps.getAll.bind(this);
     this.count = queryOps.count.bind(this);
     this.find = queryOps.find.bind(this);
     this.findOne = queryOps.findOne.bind(this);
+
+    // Старые методы запросов по индексам (для обратной совместимости)
     this.findByIndexedValue = queryOps.findByIndexedValue.bind(this);
     this.findOneByIndexedValue = queryOps.findOneByIndexedValue.bind(this);
 
+    // НОВЫЕ РАСШИРЕННЫЕ МЕТОДЫ
+    this.updateOne = queryOps.updateOne.bind(this);
+    this.updateMany = queryOps.updateMany.bind(this); // Переопределяем старый метод на новый, более мощный
+    this.findOneAndUpdate = queryOps.findOneAndUpdate.bind(this);
+    this.deleteOne = queryOps.deleteOne.bind(this);
+    this.deleteMany = queryOps.deleteMany.bind(this);
+
+    // Импорт/Экспорт
     this.exportJson = dataExchangeOps.exportJson.bind(this);
     this.exportCsv = dataExchangeOps.exportCsv.bind(this);
     this.importJson = dataExchangeOps.importJson.bind(this);
@@ -260,15 +252,10 @@ class Collection {
         }
     }
     
-    // Используем appendWalEntry ИЗ ДЕСТРУКТУРИРОВАННОГО ИМПОРТА
-    // или walManager.appendWalEntry, если импортировали объект целиком.
-    // Поскольку мы вернулись к деструктуризации, используем просто appendWalEntry.
-    // Но appendWalEntry теперь не принимает collectionOptions.
-    await require('../wal-manager.js').appendWalEntry(this.walPath, entry); // Явный вызов, чтобы избежать проблем с this в walManager
-    // Либо, если мы деструктурировали: await appendWalEntry(this.walPath, entry);
+    await require('../wal-manager.js').appendWalEntry(this.walPath, entry);
 
     this._applyWalEntryToMemory(entry, true); 
-    this._handlePotentialCheckpointTrigger(); // Убрал entry отсюда 
+    this._handlePotentialCheckpointTrigger();
     
     let nextResult = undefined;
     if (opType === 'INSERT') nextResult = entry.doc;
@@ -282,17 +269,6 @@ class Collection {
     await fs.mkdir(this.collectionDirPath, { recursive: true });
     await fs.mkdir(this.checkpointsDir, { recursive: true }); 
     
-    // --- ОТЛАДКА ---
-    // console.log(`[DEBUG _initialize] Для коллекции: ${this.name}`);
-    // console.log(`[DEBUG _initialize] Перед initializeWal. this.walPath: ${this.walPath}, typeof: ${typeof this.walPath}`);
-    if (typeof this.walPath !== 'string') {
-        const errMsg = `[DEBUG CRITICAL] this.walPath НЕ ЯВЛЯЕТСЯ СТРОКОЙ ПЕРЕД initializeWal для ${this.name}! Тип: ${typeof this.walPath}`;
-        console.error(errMsg);
-        throw new Error(errMsg);
-    }
-    // --- КОНЕЦ ОТЛАДКИ ---
-    
-    // Используем деструктурированную initializeWal
     await initializeWal(this.walPath, this.collectionDirPath);
 
     const loadedCheckpoint = await loadLatestCheckpoint(this.checkpointsDir, this.name);
@@ -303,11 +279,10 @@ class Collection {
     for (const indexMeta of loadedCheckpoint.indexesMeta || []) {
         try {
             this._indexManager.createIndex(indexMeta.fieldName, { unique: indexMeta.type === 'unique' });
-        } catch (e) { /* Ошибки создания индекса при восстановлении уже обработаны в IndexManager */ }
+        } catch (e) { /* ignore */ }
     }
     
     const walReadOptsWithLoadFlag = {...this.options.walReadOptions, isInitialLoad: true };
-    // Используем деструктурированную readWal
     const walEntries = await readWal(this.walPath, loadedCheckpoint.timestamp, walReadOptsWithLoadFlag);
     
     for (const entry of walEntries) {
@@ -365,7 +340,7 @@ class Collection {
     if (this.options.ttlCleanupIntervalMs > 0) {
         this._ttlCleanupTimer = setInterval(() => {
             try {
-                const removedCount = cleanupExpiredDocs(this.documents, this._indexManager);
+                cleanupExpiredDocs(this.documents, this._indexManager);
             } catch (e) {
                 logger.error(`[Collection] [TTL] Ошибка авто-очистки TTL для ${this.name}: ${e.message}`, e.stack);
             }
@@ -403,7 +378,6 @@ class Collection {
         this._lastCheckpointTimestamp = newTimestamp || new Date().toISOString();
         this._stats.walEntriesSinceCheckpoint = 0; 
 
-        // Используем деструктурированную compactWal
         await compactWal(this.walPath, this._lastCheckpointTimestamp); 
         
         if (this.options.checkpointsToKeep > 0) {
@@ -437,7 +411,6 @@ class Collection {
     return this._enqueue(async () => { 
         this._indexManager.createIndex(fieldName, options);
         this._indexManager.rebuildIndexesFromData(this.documents);
-        // ИЗМЕНЕНИЕ: Принудительно сохраняем состояние, чтобы метаданные индекса попали в чекпоинт
         await this.flushToDisk();
     });
   }
@@ -445,8 +418,7 @@ class Collection {
   async dropIndex(fieldName) {
     return this._enqueue(async () => {
         this._indexManager.dropIndex(fieldName);
-        // ИЗМЕНЕНИЕ: Сохраняем, чтобы удалить метаданные индекса из чекпоинта
-        await this.flushToDisk(); 
+        await this.flushToDisk();
     });
   }
 
