@@ -2,29 +2,30 @@ name: Node.js CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ master, main ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ master, main ]
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x, 22.x]
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Use Node.js 20.x
+      - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
-      - name: Run all tests in test/
-        run: |
-          for f in test/*.js; do
-            echo "=== RUN $f ==="
-            node "$f"
-          done
+      - name: Run tests
+        run: npm test
