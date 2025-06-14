@@ -30,7 +30,7 @@
     *   **Basic CLI (`wise-json`):** For core database operations via the command line.
     *   **Data Explorer (web interface & advanced CLI `wisejson-explorer`):** For convenient browsing, exporting, and managing data and indexes.
 *   **Lightweight:** Minimal external dependencies (only `uuid` and `proper-lockfile`).
-*   **Graceful Shutdown:** Automatic and proper saving of all data when the application terminates मानवtly.
+*   **Graceful Shutdown:** Automatic and proper saving of all data when the application terminates normally.
 *   **Custom ID Generator:** Allows defining a custom function for generating `_id` field values.
 *   **Multi-Process Safety:** Utilizes `proper-lockfile` to prevent data corruption when accessed from multiple Node.js processes.
 

@@ -70,11 +70,101 @@ function flattenDocToCsv(docs) {
     return csv.join('\n');
 }
 
+/**
+ * Проверяет, соответствует ли документ декларативному фильтру (в стиле MongoDB).
+ * @param {object} doc - Документ для проверки.
+ * @param {object} filter - Объект фильтра.
+ * @returns {boolean}
+ */
+function matchFilter(doc, filter) {
+    if (typeof filter !== 'object' || filter == null || doc === null || typeof doc !== 'object') {
+        return false;
+    }
+
+    if (Array.isArray(filter.$or)) {
+        return filter.$or.some(f => matchFilter(doc, f));
+    }
+    if (Array.isArray(filter.$and)) {
+        return filter.$and.every(f => matchFilter(doc, f));
+    }
+
+    for (const key of Object.keys(filter)) {
+        if (key === '$or' || key === '$and') continue;
+
+        const cond = filter[key];
+        const value = doc[key];
+
+        if (typeof cond === 'object' && cond !== null && !Array.isArray(cond)) {
+            for (const op of Object.keys(cond)) {
+                const opVal = cond[op];
+                let match = true;
+                switch (op) {
+                    case '$gt':   if (!(value > opVal)) match = false; break;
+                    case '$gte':  if (!(value >= opVal)) match = false; break;
+                    case '$lt':   if (!(value < opVal)) match = false; break;
+                    case '$lte':  if (!(value <= opVal)) match = false; break;
+                    case '$ne':   if (value === opVal) match = false; break;
+                    
+                    // --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+                    case '$in': {
+                        if (!Array.isArray(opVal)) {
+                            match = false;
+                        } else if (Array.isArray(value)) {
+                            // Если поле в документе - массив, проверяем пересечение
+                            match = value.some(item => opVal.includes(item));
+                        } else {
+                            // Если поле в документе - простое значение
+                            match = opVal.includes(value);
+                        }
+                        break;
+                    }
+                    case '$nin': {
+                        if (!Array.isArray(opVal)) {
+                            match = false;
+                        } else if (Array.isArray(value)) {
+                            // Если поле в документе - массив, проверяем отсутствие пересечений
+                            match = !value.some(item => opVal.includes(item));
+                        } else {
+                            // Если поле в документе - простое значение
+                            match = !opVal.includes(value);
+                        }
+                        break;
+                    }
+                    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
+                    case '$exists': if ((value !== undefined) !== opVal) match = false; break;
+                    case '$regex': {
+                        if (typeof value !== 'string') {
+                            match = false;
+                        } else {
+                            try {
+                                const re = new RegExp(opVal, cond.$options || '');
+                                if (!re.test(value)) match = false;
+                            } catch (e) {
+                                match = false;
+                            }
+                        }
+                        break;
+                    }
+                    default:
+                        match = false;
+                        break;
+                }
+                if (!match) return false;
+            }
+        } else {
+            if (value !== cond) return false;
+        }
+    }
+    return true;
+}
+
 module.exports = {
     defaultIdGenerator,
     isNonEmptyString,
     isPlainObject,
     makeAbsolutePath,
     validateOptions,
-    flattenDocToCsv
+    flattenDocToCsv,
+    matchFilter,
 };
