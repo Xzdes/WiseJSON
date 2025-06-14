@@ -98,72 +98,62 @@ async function main() {
   const users = await db.collection('users');
   await users.initPromise; // Дожидаемся инициализации самой коллекции
 
+  // Очистим для предсказуемого результата
+  await users.clear();
+
+  // Создаем индексы для быстрых запросов
+  await users.createIndex('city'); // Обычный индекс
+  await users.createIndex('email', { unique: true }); // Уникальный индекс
+  console.log('Индексы созданы:', await users.getIndexes());
+
   // Вставка одного документа
-  const user1 = await users.insert({ name: 'Алиса', age: 30, city: 'Москва' });
-  console.log('Вставлен пользователь:', user1);
+  await users.insert({ name: 'Алиса', email: 'alice@example.com', age: 30, city: 'Москва' });
 
   // Пакетная вставка нескольких документов
-  const userBatch = await users.insertMany([
-    { name: 'Борис', age: 24, city: 'Санкт-Петербург' },
-    { name: 'Вера', age: 35, city: 'Новосибирск', tags: ['dev', 'котики'] }
+  await users.insertMany([
+    { name: 'Борис', email: 'bob@example.com', age: 24, city: 'Лондон' },
+    { name: 'Вера', email: 'vera@example.com', age: 35, city: 'Париж', tags: ['dev', 'котики'] }
   ]);
-  console.log(`Вставлено ${userBatch.length} пользователей пакетом.`);
+  console.log(`Всего пользователей после вставки: ${await users.count()}`);
 
-  // Получение всех документов из коллекции
-  const allUsers = await users.getAll();
-  console.log('Все пользователи:', allUsers.length);
+  // Поиск документов с помощью объекта-фильтра (современный, рекомендуемый способ)
+  const usersFromLondon = await users.find({ city: 'Лондон' });
+  console.log('Пользователи из Лондона:', usersFromLondon);
 
-  // Поиск документов по условию
-  const usersFromMoscow = await users.find(user => user.city === 'Москва');
-  console.log('Пользователи из Москвы:', usersFromMoscow);
+  // Поиск одного документа с операторами
+  const devUser = await users.findOne({ tags: 'dev', age: { $gt: 30 } });
+  console.log('Первый разработчик старше 30:', devUser);
 
-  // Поиск одного документа
-  const devUser = await users.findOne(user => user.tags && user.tags.includes('dev'));
-  console.log('Первый разработчик:', devUser);
-
-  // Обновление документа
+  // Обновление документа по ID
   if (devUser) {
     const updatedDevUser = await users.update(devUser._id, { age: devUser.age + 1, lastLogin: new Date().toISOString() });
     console.log('Обновленный разработчик:', updatedDevUser);
   }
 
-  // Пакетное обновление документов
-  const updatedCount = await users.updateMany(
-    (user) => user.age > 30, // Условие для обновления
-    { status: 'senior' }     // Данные для обновления
+  // Пакетное обновление документов с помощью фильтра и операторов обновления
+  const updateResult = await users.updateMany(
+    { age: { $gte: 25 } },       // Фильтр: найти пользователей 25 лет и старше
+    { $set: { status: 'active' } } // Оператор обновления: установить им статус
   );
-  console.log(`Обновлено ${updatedCount} пользователей (статус senior).`);
-
-  // Создание индексов
-  await users.createIndex('city'); // Обычный индекс
-  await users.createIndex('name', { unique: true }); // Уникальный индекс
-
-  // Поиск по индексу
-  const usersFromSpbByIndex = await users.findByIndexedValue('city', 'Санкт-Петербург');
-  console.log('Пользователи из Санкт-Петербурга (по индексу):', usersFromSpbByIndex);
-
-  const borisByName = await users.findOneByIndexedValue('name', 'Борис');
-  console.log('Борис (по уникальному индексу имени):', borisByName);
-
-  console.log('Текущие индексы:', await users.getIndexes());
+  console.log(`Обновлено ${updateResult.modifiedCount} пользователей (статус active).`);
 
   // Вставка документа с TTL (время жизни 5 секунд)
-  const temporaryData = await users.insert({
+  await users.insert({
+    email: 'temp@example.com',
     message: 'Это сообщение самоуничтожится через 5 секунд',
-    expireAt: Date.now() + 5000 // Точное время истечения
-    // или можно использовать: ttl: 5000 (в мс от createdAt)
+    ttl: 5000 // в мс от createdAt
   });
-  console.log('Вставлены временные данные (ID):', temporaryData._id);
+  console.log('Вставлены временные данные.');
 
   // Пример транзакции
   const txn = db.beginTransaction();
   try {
-    const logs = await db.collection('logs'); // Убедимся, что коллекция логов доступна
-    await logs.initPromise;
+    const logsCollection = await db.collection('logs');
+    await logsCollection.initPromise;
 
     // Операции внутри транзакции
-    await txn.collection('users').insert({ name: 'Диана В Транзакции', age: 28 });
-    await txn.collection('logs').insert({ action: 'USER_CREATED', user: 'Диана В Транзакции', timestamp: Date.now() });
+    await txn.collection('users').insert({ name: 'Диана', email: 'diana@example.com', age: 28 });
+    await txn.collection('logs').insert({ action: 'USER_CREATED', user: 'Диана', timestamp: Date.now() });
     
     await txn.commit(); // Применяем транзакцию
     console.log('Транзакция успешно завершена.');
@@ -171,9 +161,6 @@ async function main() {
     await txn.rollback(); // Откатываем изменения в случае ошибки
     console.error('Ошибка транзакции, изменения отменены:', error);
   }
-
-  // Статистика коллекции
-  console.log('Статистика коллекции users:', await users.stats());
 
   // Закрытие базы данных (важно для сохранения всех данных)
   await db.close();

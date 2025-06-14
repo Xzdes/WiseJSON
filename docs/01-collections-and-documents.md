@@ -6,7 +6,7 @@ docs/01-collections-and-documents.md
 
 **Предполагается, что у вас уже есть инициализированный экземпляр `WiseJSON` (переменная `db`) и получен экземпляр коллекции с дождавшимся `initPromise` (переменная `collection`), как описано в разделе `00-introduction-and-setup.md`.**
 
-## Добавление Документов
+## Добавление Документов (Create)
 
 ### Как добавить один документ (`insert`)
 
@@ -15,60 +15,37 @@ docs/01-collections-and-documents.md
 *   **Параметры:**
     *   `document {object}`: JavaScript-объект, который вы хотите сохранить.
         *   Если вы предоставите поле `_id` в объекте `document`, оно будет использовано как уникальный идентификатор.
-        *   Если поле `_id` не предоставлено, WiseJSON DB автоматически сгенерирует уникальный `_id`.
-*   **Возвращает:** `Promise<object>` - Промис, который разрешается объектом вставленного документа. Этот объект будет содержать поля `_id` (даже если сгенерирован автоматически), `createdAt` (время создания в формате ISO-строки) и `updatedAt` (время последнего обновления, изначально совпадает с `createdAt`).
+        *   Если поле `_id` не предоставлено, WiseJSON DB автоматически сгенерирует уникальный `_id` (согласно опции `idGenerator`).
+*   **Возвращает:** `Promise<object>` - Промис, который разрешается объектом вставленного документа. Этот объект будет содержать поля `_id`, `createdAt` (время создания в формате ISO-строки) и `updatedAt` (время последнего обновления, изначально совпадает с `createdAt`).
 *   **Ошибки:** Может выбросить ошибку, если, например, нарушается уникальность индекса (подробнее об индексах в соответствующем разделе).
 
 **Пример:**
 
 ```javascript
-const WiseJSON = require('wise-json-db');
-const path = require('path');
+// Добавляем новый документ с авто-ID
+const newUser = await usersCollection.insert({
+  name: 'Alice Wonder',
+  email: 'alice@example.com',
+  age: 30
+});
+console.log('Добавлен пользователь:', newUser);
+// Пример вывода newUser:
+// {
+//   name: 'Alice Wonder',
+//   email: 'alice@example.com',
+//   age: 30,
+//   _id: 'сгенерированный_id',
+//   createdAt: '2023-10-27T10:00:00.000Z',
+//   updatedAt: '2023-10-27T10:00:00.000Z'
+// }
 
-async function addSingleDocument() {
-  const dbPath = path.resolve(__dirname, 'myAppDb');
-  let db;
-  try {
-    db = new WiseJSON(dbPath);
-    await db.init();
-    const usersCollection = await db.collection('users');
-    await usersCollection.initPromise;
-
-    // Добавляем новый документ
-    const newUser = await usersCollection.insert({
-      name: 'Alice Wonder',
-      email: 'alice@example.com',
-      age: 30
-    });
-    console.log('Добавлен пользователь:', newUser);
-    // Пример вывода newUser:
-    // {
-    //   name: 'Alice Wonder',
-    //   email: 'alice@example.com',
-    //   age: 30,
-    //   _id: 'генерированный_id',
-    //   createdAt: '2023-10-27T10:00:00.000Z',
-    //   updatedAt: '2023-10-27T10:00:00.000Z'
-    // }
-
-    // Добавляем документ с предопределенным _id
-    const specificUser = await usersCollection.insert({
-      _id: 'user123',
-      name: 'Bob The Builder',
-      role: 'admin'
-    });
-    console.log('Добавлен пользователь с конкретным ID:', specificUser);
-
-  } catch (error) {
-    console.error('Ошибка при добавлении документа:', error);
-  } finally {
-    if (db) {
-      await db.close();
-    }
-  }
-}
-
-addSingleDocument();
+// Добавляем документ с предопределенным _id
+const specificUser = await usersCollection.insert({
+  _id: 'user123',
+  name: 'Bob The Builder',
+  role: 'admin'
+});
+console.log('Добавлен пользователь с конкретным ID:', specificUser);
 ```
 
 ### Как добавить несколько документов сразу (`insertMany`)
@@ -78,43 +55,19 @@ addSingleDocument();
 *   **Параметры:**
     *   `documentsArray {Array<object>}`: Массив JavaScript-объектов для вставки. Для каждого объекта действуют те же правила относительно `_id`, что и для `insert`.
 *   **Возвращает:** `Promise<Array<object>>` - Промис, который разрешается массивом вставленных документов, каждый из которых будет содержать `_id`, `createdAt` и `updatedAt`.
-*   **Поведение при ошибках:** WiseJSON DB обрабатывает большие массивы в insertMany путем их разделения на более мелкие порции (чанки) для записи в журнал упреждающей записи (WAL). Если при обработке одного из таких чанков возникает ошибка (например, нарушение уникального индекса), то только этот чанк и все последующие чанки в рамках данного вызова insertMany не будут применены. Документы из успешно обработанных предыдущих чанков останутся в базе данных. Будет выброшена ошибка, относящаяся к проблемному чанку.
+*   **Поведение при ошибках:** WiseJSON DB обрабатывает большие массивы в `insertMany` путем их разделения на более мелкие порции (чанки). Если при обработке одного из чанков возникает ошибка (например, нарушение уникального индекса), то только этот чанк и все последующие не будут применены. Документы из успешно обработанных предыдущих чанков останутся в базе данных. Будет выброшена ошибка, относящаяся к проблемному чанку.
 
 **Пример:**
 
 ```javascript
-const WiseJSON = require('wise-json-db');
-const path = require('path');
+const newProducts = [
+  { name: 'Ноутбук', category: 'Электроника', price: 1200 },
+  { name: 'Смартфон', category: 'Электроника', price: 800 },
+  { _id: 'book-451', name: 'Книга "451 градус по Фаренгейту"', category: 'Книги', price: 15 }
+];
 
-async function addMultipleDocuments() {
-  const dbPath = path.resolve(__dirname, 'myAppDb');
-  let db;
-  try {
-    db = new WiseJSON(dbPath);
-    await db.init();
-    const productsCollection = await db.collection('products');
-    await productsCollection.initPromise;
-
-    const newProducts = [
-      { name: 'Ноутбук', category: 'Электроника', price: 1200 },
-      { name: 'Смартфон', category: 'Электроника', price: 800 },
-      { _id: 'book-451', name: 'Книга "451 градус по Фаренгейту"', category: 'Книги', price: 15 }
-    ];
-
-    const insertedProducts = await productsCollection.insertMany(newProducts);
-    console.log(`Успешно добавлено ${insertedProducts.length} продуктов:`);
-    insertedProducts.forEach(p => console.log(p));
-
-  } catch (error) {
-    console.error('Ошибка при пакетном добавлении документов:', error);
-  } finally {
-    if (db) {
-      await db.close();
-    }
-  }
-}
-
-addMultipleDocuments();
+const insertedProducts = await productsCollection.insertMany(newProducts);
+console.log(`Успешно добавлено ${insertedProducts.length} продуктов.`);
 ```
 
 ### Как добавить документ с ограниченным временем жизни (TTL)
@@ -124,352 +77,201 @@ WiseJSON DB позволяет устанавливать время жизни 
 *   **`ttl {number}`**: Время жизни документа в миллисекундах с момента его создания (поле `createdAt`).
 *   **`expireAt {number | string}`**: Точное время (Unix timestamp в миллисекундах или строка в формате ISO 8601), когда документ должен истечь и быть удален.
 
-Если указаны оба поля, приоритет будет у `expireAt`. Очистка устаревших документов происходит периодически (настраивается опцией `ttlCleanupIntervalMs` при инициализации `WiseJSON`) или при некоторых операциях чтения.
+Если указаны оба поля, приоритет будет у `expireAt`. Очистка устаревших документов происходит периодически.
 
 **Пример:**
 
 ```javascript
-const WiseJSON = require('wise-json-db');
-const path = require('path');
+// Документ, который "умрет" через 10 секунд после создания
+await tempCollection.insert({
+  message: 'Это сообщение исчезнет через 10 секунд.',
+  ttl: 10000 // 10 секунд
+});
 
-async function addDocumentsWithTTL() {
-  const dbPath = path.resolve(__dirname, 'myAppDb');
-  let db;
-  try {
-    // Установим короткий интервал очистки TTL для демонстрации
-    db = new WiseJSON(dbPath, { ttlCleanupIntervalMs: 5000 }); // Проверять каждые 5 секунд
-    await db.init();
-    const tempCollection = await db.collection('temp_data');
-    await tempCollection.initPromise;
-
-    // Документ, который "умрет" через 10 секунд после создания
-    const shortLivedDoc = await tempCollection.insert({
-      message: 'Это сообщение исчезнет через 10 секунд.',
-      ttl: 10000 // 10 секунд
-    });
-    console.log('Добавлен документ с коротким TTL:', shortLivedDoc);
-
-    // Документ, который "умрет" в определенное время (через 1 минуту от текущего)
-    const specificExpiryDoc = await tempCollection.insert({
-      data: 'Информация, актуальная 1 минуту.',
-      expireAt: Date.now() + 60000 // Через 60 секунд
-    });
-    console.log('Добавлен документ с конкретным временем истечения:', specificExpiryDoc);
-
-    console.log(`Текущее количество документов: ${await tempCollection.count()}`); // Будет 2
-
-    // Подождем 12 секунд, чтобы shortLivedDoc точно истек и был шанс на срабатывание очистки
-    console.log('Ожидаем 12 секунд для истечения TTL...');
-    await new Promise(resolve => setTimeout(resolve, 12000));
-
-    // При вызове count() также может произойти очистка TTL
-    const countAfterTTL = await tempCollection.count();
-    console.log(`Количество документов после ожидания: ${countAfterTTL}`); // Ожидаем 1 (specificExpiryDoc еще жив)
-
-    const stillExists = await tempCollection.getById(specificExpiryDoc._id);
-    console.log('Документ с expireAt все еще существует:', !!stillExists);
-
-
-  } catch (error) {
-    console.error('Ошибка при работе с TTL документами:', error);
-  } finally {
-    if (db) {
-      await db.close();
-    }
-  }
-}
-
-addDocumentsWithTTL();
+// Документ, который "умрет" в определенное время
+await tempCollection.insert({
+  data: 'Информация, актуальная 1 минуту.',
+  expireAt: Date.now() + 60000 // Через 60 секунд
+});
 ```
 
-## Чтение Документов
+## Чтение Документов (Read)
 
-Описание операций чтения (`getById`, `getAll`, `find`, `findOne`) будет в файле `02-querying-and-indexing.md`.
+Описание операций чтения (`getById`, `getAll`, `find`, `findOne`), использующих мощные фильтры и индексы, находится в следующем разделе: **`02-querying-and-indexing.md`**.
 
-## Обновление Документов
+## Обновление Документов (Update)
+
+WiseJSON DB предлагает несколько методов для обновления документов. Простые методы работают по `_id`, а продвинутые используют **объекты-фильтры** и **операторы обновления**, аналогичные MongoDB.
 
 ### Как обновить один документ по ID (`update`)
 
-Метод `collection.update(id, updates)` позволяет обновить поля существующего документа.
+Метод `collection.update(id, updates)` позволяет частично обновить поля существующего документа. Поля, присутствующие в `updates`, будут изменены или добавлены, а отсутствующие — останутся без изменений.
 
 *   **Параметры:**
-    *   `id {string}`: Уникальный идентификатор `_id` документа, который нужно обновить.
-    *   `updates {object}`: Объект, содержащий поля и их новые значения. Поля, присутствующие в `updates`, будут изменены или добавлены в документ. Поля, отсутствующие в `updates`, останутся без изменений.
-        *   **Важно:** Вы не можете изменить поле `_id` или `createdAt` с помощью этого метода. Поле `updatedAt` будет автоматически обновлено текущим временем.
-*   **Возвращает:** `Promise<object | null>` - Промис, который разрешается обновленным объектом документа, если документ с таким `id` был найден и успешно обновлен. Если документ не найден, промис разрешается значением `null`.
-*   **Ошибки:** Может выбросить ошибку, если обновление приведет к нарушению уникальности индекса.
+    *   `id {string}`: Уникальный `_id` документа для обновления.
+    *   `updates {object}`: Объект, содержащий поля и их новые значения.
+*   **Возвращает:** `Promise<object | null>` - Промис, который разрешается обновленным объектом документа, или `null`, если документ не найден.
+*   **Важно:** Этот метод не может изменить `_id` или `createdAt`. Поле `updatedAt` будет обновлено автоматически.
 
 **Пример:**
 
 ```javascript
-const WiseJSON = require('wise-json-db');
-const path = require('path');
-
-async function updateSingleDocument() {
-  const dbPath = path.resolve(__dirname, 'myAppDb');
-  let db;
-  try {
-    db = new WiseJSON(dbPath);
-    await db.init();
-    const usersCollection = await db.collection('users');
-    await usersCollection.initPromise;
-
-    // Сначала добавим пользователя, чтобы было что обновлять
-    const userToUpdate = await usersCollection.insert({ name: 'Old Name', email: 'old@example.com', age: 25 });
-    console.log('Пользователь до обновления:', userToUpdate);
-
-    if (userToUpdate) {
-      const updates = {
-        name: 'New Name',
-        age: 26,
-        status: 'active' // Добавляем новое поле
-      };
-      const updatedUser = await usersCollection.update(userToUpdate._id, updates);
-
-      if (updatedUser) {
-        console.log('Пользователь после обновления:', updatedUser);
-        // Пример вывода updatedUser:
-        // {
-        //   _id: userToUpdate._id,
-        //   name: 'New Name',
-        //   email: 'old@example.com', // email не изменился, т.к. не было в updates
-        //   age: 26,
-        //   status: 'active',
-        //   createdAt: userToUpdate.createdAt,
-        //   updatedAt: 'новое_время_обновления'
-        // }
-      } else {
-        console.log(`Пользователь с ID ${userToUpdate._id} не найден для обновления.`);
-      }
-    }
-
-    // Попытка обновить несуществующий документ
-    const nonExistentUpdate = await usersCollection.update('non-existent-id', { name: 'Ghost' });
-    console.log('Результат обновления несуществующего документа:', nonExistentUpdate); // Выведет: null
-
-  } catch (error) {
-    console.error('Ошибка при обновлении документа:', error);
-  } finally {
-    if (db) {
-      await db.close();
-    }
-  }
+const userToUpdate = await usersCollection.findOne({ email: 'alice@example.com' });
+if (userToUpdate) {
+  const updatedUser = await usersCollection.update(userToUpdate._id, {
+    age: 31,
+    status: 'active' // Добавляем новое поле
+  });
+  console.log('Пользователь после обновления:', updatedUser);
 }
-
-updateSingleDocument();
 ```
 
-### Как обновить несколько документов по условию (`updateMany`)
+### Продвинутое обновление с фильтрами и операторами
 
-Метод `collection.updateMany(predicate, updates)` обновляет все документы в коллекции, которые соответствуют заданной функции-предикату.
+Для более сложных обновлений используются методы, принимающие **фильтр** для поиска документов и **операторы** для их изменения.
+
+**Основные операторы обновления:**
+*   `$set`: Устанавливает значение поля.
+*   `$inc`: Увеличивает (или уменьшает) числовое поле.
+*   `$unset`: Удаляет поле из документа.
+*   `$push`: Добавляет элемент в массив.
+
+#### Обновление одного документа по фильтру (`updateOne`)
+
+Метод `collection.updateOne(filter, update)` находит **первый** документ, соответствующий `filter`, и применяет к нему изменения, описанные в `update`.
 
 *   **Параметры:**
-    *   `predicate {function}`: Синхронная функция, которая будет вызвана для каждого документа в коллекции. Функция принимает один аргумент — объект документа, и должна вернуть `true`, если документ нужно обновить, или `false` в противном случае.
-        *   Пример предиката: `(doc) => doc.category === 'Электроника' && doc.price < 1000`
-    *   `updates {object}`: Объект с полями для обновления, аналогично методу `update`.
-*   **Возвращает:** `Promise<number>` - Промис, который разрешается числом — количеством успешно обновленных документов.
-*   **Поведение при ошибках:** Если при обновлении одного из документов возникает ошибка (например, нарушение уникального индекса), операция `updateMany` прервется на этом документе, и ошибка будет выброшена. Документы, обработанные до ошибки, останутся обновленными. Возвращаемое значение в случае ошибки не определено (т.к. промис будет отклонен).
+    *   `filter {object}`: Объект-фильтр для поиска (синтаксис как в `find`).
+    *   `update {object}`: Объект с операторами обновления.
+*   **Возвращает:** `Promise<{ matchedCount: number, modifiedCount: number }>`
+    *   `matchedCount`: Количество найденных документов (0 или 1).
+    *   `modifiedCount`: Количество реально измененных документов (0 или 1).
 
 **Пример:**
 
 ```javascript
-const WiseJSON = require('wise-json-db');
-const path = require('path');
+// Увеличить возраст пользователя 'Alice' на 1 и установить ей новый статус
+const filter = { email: 'alice@example.com' };
+const update = {
+  $inc: { age: 1 },
+  $set: { lastSeen: new Date().toISOString() }
+};
 
-async function updateMultipleDocuments() {
-  const dbPath = path.resolve(__dirname, 'myAppDb');
-  let db;
-  try {
-    db = new WiseJSON(dbPath);
-    await db.init();
-    const productsCollection = await db.collection('products_for_update'); // Используем новую коллекцию для чистоты
-    await productsCollection.initPromise;
-    await productsCollection.clear(); // Очистим на всякий случай
-
-    await productsCollection.insertMany([
-      { name: 'Товар A', category: 'cat1', status: 'pending', stock: 10 },
-      { name: 'Товар B', category: 'cat2', status: 'pending', stock: 5 },
-      { name: 'Товар C', category: 'cat1', status: 'active', stock: 20 },
-      { name: 'Товар D', category: 'cat1', status: 'pending', stock: 0 },
-    ]);
-
-    // Обновим статус всех товаров категории 'cat1' со статусом 'pending' на 'processing'
-    // и добавим поле 'lastChecked'
-    const predicate = (doc) => doc.category === 'cat1' && doc.status === 'pending';
-    const updates = { status: 'processing', lastChecked: new Date().toISOString() };
-
-    const updatedCount = await productsCollection.updateMany(predicate, updates);
-    console.log(`Обновлено ${updatedCount} документов.`); // Ожидаем 2 (Товар A, Товар D)
-
-    // Проверим результат
-    const updatedDocs = await productsCollection.find(doc => doc.status === 'processing');
-    console.log('Документы со статусом "processing":');
-    updatedDocs.forEach(doc => console.log(doc));
-
-  } catch (error) {
-    console.error('Ошибка при пакетном обновлении документов:', error);
-  } finally {
-    if (db) {
-      await db.close();
-    }
-  }
-}
-
-updateMultipleDocuments();
+const result = await usersCollection.updateOne(filter, update);
+console.log(`Найдено для обновления: ${result.matchedCount}, изменено: ${result.modifiedCount}`);
 ```
 
-## Удаление Документов
+#### Обновление нескольких документов по фильтру (`updateMany`)
+
+Метод `collection.updateMany(filter, update)` применяет изменения ко **всем** документам, которые соответствуют `filter`.
+
+*   **Параметры:** Аналогичны `updateOne`.
+*   **Возвращает:** `Promise<{ matchedCount: number, modifiedCount: number }>`
+
+**Пример:**
+
+```javascript
+// Дать скидку 10% на все книги в наличии
+const filter = { category: 'Книги', stock: { $gt: 0 } };
+const update = { $set: { onSale: true, discount: 0.1 } };
+
+const result = await productsCollection.updateMany(filter, update);
+console.log(`Найдено товаров для скидки: ${result.matchedCount}, обновлено: ${result.modifiedCount}`);
+```
+
+#### Найти и обновить атомарно (`findOneAndUpdate`)
+
+Этот метод находит один документ, обновляет его и возвращает. Идеально подходит для сценариев, где нужно получить документ в его старом или новом состоянии сразу после изменения (например, для счетчиков).
+
+*   **Параметры:**
+    *   `filter {object}`: Фильтр для поиска.
+    *   `update {object}`: Объект с операторами обновления.
+    *   `options.returnOriginal {boolean}`: Если `false` (по умолчанию), возвращает документ **после** обновления. Если `true`, возвращает документ **до** обновления.
+*   **Возвращает:** `Promise<object | null>` - Документ (до или после обновления) или `null`, если ничего не найдено.
+
+**Пример:**
+
+```javascript
+// Зарезервировать один товар и вернуть его состояние *до* резервации
+const filter = { name: 'Ноутбук', stock: { $gt: 0 } };
+const update = { $inc: { stock: -1 } };
+const options = { returnOriginal: true };
+
+const originalProductState = await productsCollection.findOneAndUpdate(filter, update, options);
+
+if (originalProductState) {
+  console.log(`Товар успешно зарезервирован. Остаток на складе был: ${originalProductState.stock}`);
+}
+```
+
+## Удаление Документов (Delete)
 
 ### Как удалить один документ по ID (`remove`)
 
 Метод `collection.remove(id)` удаляет один документ из коллекции по его `_id`.
 
 *   **Параметры:**
-    *   `id {string}`: Уникальный идентификатор `_id` документа для удаления.
-*   **Возвращает:** `Promise<boolean>` - Промис, который разрешается значением `true`, если документ был найден и успешно удален. Если документ с таким `id` не найден, промис разрешается значением `false`.
+    *   `id {string}`: Уникальный `_id` документа для удаления.
+*   **Возвращает:** `Promise<boolean>` - `true`, если документ был найден и удален, иначе `false`.
 
 **Пример:**
 
 ```javascript
-const WiseJSON = require('wise-json-db');
-const path = require('path');
-
-async function removeSingleDocument() {
-  const dbPath = path.resolve(__dirname, 'myAppDb');
-  let db;
-  try {
-    db = new WiseJSON(dbPath);
-    await db.init();
-    const itemsCollection = await db.collection('items_to_remove');
-    await itemsCollection.initPromise;
-    await itemsCollection.clear();
-
-    const item1 = await itemsCollection.insert({ name: 'Элемент 1' });
-    await itemsCollection.insert({ name: 'Элемент 2' });
-
-    console.log(`Количество элементов до удаления: ${await itemsCollection.count()}`); // 2
-
-    // Удаляем Элемент 1
-    const removeResult = await itemsCollection.remove(item1._id);
-    console.log(`Результат удаления элемента с ID ${item1._id}: ${removeResult}`); // true
-
-    console.log(`Количество элементов после удаления: ${await itemsCollection.count()}`); // 1
-
-    // Попытка удалить несуществующий элемент
-    const nonExistentRemove = await itemsCollection.remove('non-existent-id');
-    console.log(`Результат удаления несуществующего элемента: ${nonExistentRemove}`); // false
-
-  } catch (error) {
-    console.error('Ошибка при удалении документа:', error);
-  } finally {
-    if (db) {
-      await db.close();
-    }
-  }
-}
-
-removeSingleDocument();
+const wasRemoved = await itemsCollection.remove('some-item-id');
+console.log(`Документ был удален: ${wasRemoved}`);
 ```
 
-### Как удалить несколько документов по условию (`removeMany`)
+### Продвинутое удаление с фильтрами
 
-Метод `collection.removeMany(predicate)` удаляет все документы, соответствующие функции-предикату.
+#### Удаление одного документа по фильтру (`deleteOne`)
+
+Метод `collection.deleteOne(filter)` удаляет **первый** документ, соответствующий `filter`.
 
 *   **Параметры:**
-    *   `predicate {function}`: Синхронная функция, которая принимает объект документа и возвращает `true` (удалить) или `false` (оставить).
-*   **Возвращает:** `Promise<number>` - Промис, который разрешается числом — количеством успешно удаленных документов.
+    *   `filter {object}`: Фильтр для поиска документа на удаление.
+*   **Возвращает:** `Promise<{ deletedCount: number }>` - Объект, где `deletedCount` равен 0 или 1.
 
 **Пример:**
 
 ```javascript
-const WiseJSON = require('wise-json-db');
-const path = require('path');
+// Удалить один неактивный лог
+const result = await logsCollection.deleteOne({ level: 'debug', processed: true });
+console.log(`Удалено логов: ${result.deletedCount}`);
+```
 
-async function removeMultipleDocuments() {
-  const dbPath = path.resolve(__dirname, 'myAppDb');
-  let db;
-  try {
-    db = new WiseJSON(dbPath);
-    await db.init();
-    const tasksCollection = await db.collection('tasks_for_removal');
-    await tasksCollection.initPromise;
-    await tasksCollection.clear();
+#### Удаление нескольких документов по фильтру (`deleteMany`)
 
-    await tasksCollection.insertMany([
-      { description: 'Задача 1', status: 'completed', priority: 1 },
-      { description: 'Задача 2', status: 'pending', priority: 2 },
-      { description: 'Задача 3', status: 'completed', priority: 3 },
-      { description: 'Задача 4', status: 'in-progress', priority: 1 },
-      { description: 'Задача 5', status: 'completed', priority: 2 },
-    ]);
-    console.log(`Всего задач до удаления: ${await tasksCollection.count()}`); // 5
+Метод `collection.deleteMany(filter)` удаляет **все** документы, соответствующие `filter`.
 
-    // Удалим все выполненные задачи ('completed')
-    const predicate = (doc) => doc.status === 'completed';
-    const removedCount = await tasksCollection.removeMany(predicate);
+*   **Параметры:**
+    *   `filter {object}`: Фильтр для поиска документов на удаление.
+*   **Возвращает:** `Promise<{ deletedCount: number }>` - Объект с количеством удаленных документов.
 
-    console.log(`Удалено ${removedCount} выполненных задач.`); // Ожидаем 3
-    console.log(`Всего задач после удаления: ${await tasksCollection.count()}`); // Ожидаем 2
+**Пример:**
 
-    const remainingTasks = await tasksCollection.getAll();
-    console.log('Оставшиеся задачи:');
-    remainingTasks.forEach(task => console.log(task.description, task.status));
+```javascript
+// Удалить все сессии пользователя, которые истекли
+const filter = {
+  userId: 'user-123',
+  expiresAt: { $lt: new Date().toISOString() }
+};
 
-  } catch (error) {
-    console.error('Ошибка при пакетном удалении документов:', error);
-  } finally {
-    if (db) {
-      await db.close();
-    }
-  }
-}
-
-removeMultipleDocuments();
+const result = await sessionsCollection.deleteMany(filter);
+console.log(`Удалено устаревших сессий: ${result.deletedCount}`);
 ```
 
 ### Как удалить все документы из коллекции (`clear`)
 
-Метод `collection.clear()` удаляет **все** документы из коллекции.
+Метод `collection.clear()` удаляет **все** документы из коллекции. Используйте с осторожностью.
 
 *   **Параметры:** Нет.
-*   **Возвращает:** `Promise<boolean>` - Промис, который разрешается `true`, если операция очистки прошла успешно. (Обычно всегда `true`, если не возникло внутренних ошибок).
+*   **Возвращает:** `Promise<boolean>` - Промис, который разрешается `true` при успешной очистке.
 
 **Пример:**
 
 ```javascript
-const WiseJSON = require('wise-json-db');
-const path = require('path');
-
-async function clearWholeCollection() {
-  const dbPath = path.resolve(__dirname, 'myAppDb');
-  let db;
-  try {
-    db = new WiseJSON(dbPath);
-    await db.init();
-    const logsCollection = await db.collection('logs_to_clear');
-    await logsCollection.initPromise;
-
-    await logsCollection.insertMany([
-      { level: 'info', message: 'Log 1' },
-      { level: 'error', message: 'Log 2' },
-    ]);
-    console.log(`Количество логов до очистки: ${await logsCollection.count()}`); // 2
-
-    const clearResult = await logsCollection.clear();
-    console.log(`Результат очистки коллекции: ${clearResult}`); // true
-
-    console.log(`Количество логов после очистки: ${await logsCollection.count()}`); // 0
-
-  } catch (error) {
-    console.error('Ошибка при очистке коллекции:', error);
-  } finally {
-    if (db) {
-      await db.close();
-    }
-  }
-}
-
-clearWholeCollection();
+const clearResult = await logsCollection.clear();
+console.log(`Результат очистки коллекции: ${clearResult}`);
 ```
 
 ## Подсчет Документов
@@ -484,49 +286,7 @@ clearWholeCollection();
 **Пример:**
 
 ```javascript
-const WiseJSON = require('wise-json-db');
-const path = require('path');
-
-async function countDocumentsInCollection() {
-  const dbPath = path.resolve(__dirname, 'myAppDb');
-  let db;
-  try {
-    db = new WiseJSON(dbPath);
-    await db.init();
-    const itemsCollection = await db.collection('items_for_counting');
-    await itemsCollection.initPromise;
-    await itemsCollection.clear(); // Начинаем с чистой коллекции
-
-    const initialCount = await itemsCollection.count();
-    console.log(`Начальное количество элементов: ${initialCount}`); // 0
-
-    await itemsCollection.insertMany([
-      { name: 'Предмет A' },
-      { name: 'Предмет B', ttl: 1000 }, // Этот истечет, если подождать
-      { name: 'Предмет C' },
-    ]);
-
-    const countAfterInsert = await itemsCollection.count();
-    console.log(`Количество элементов после вставки: ${countAfterInsert}`); // 3
-
-    // Для демонстрации TTL и count:
-    // Если вы хотите увидеть, как count учитывает TTL,
-    // вам нужно будет подождать истечения TTL и, возможно,
-    // явно вызвать cleanupExpiredDocs или положиться на автоматическую очистку,
-    // которая также может быть вызвана некоторыми операциями чтения, включая count.
-    // await new Promise(r => setTimeout(r, 1500)); // Ждем > 1 секунды
-    // const countAfterTTLWait = await itemsCollection.count();
-    // console.log(`Количество элементов после ожидания TTL: ${countAfterTTLWait}`); // Ожидаемо 2
-
-  } catch (error) {
-    console.error('Ошибка при подсчете документов:', error);
-  } finally {
-    if (db) {
-      await db.close();
-    }
-  }
-}
-
-countDocumentsInCollection();
+const totalUsers = await usersCollection.count();
+console.log(`Всего пользователей в системе: ${totalUsers}`);
 ```
-В следующем разделе мы рассмотрим, как эффективно искать документы с использованием различных методов запросов и индексов.
+В следующем разделе мы подробно рассмотрим, как эффективно искать и фильтровать документы с помощью `find`, `findOne` и индексов.

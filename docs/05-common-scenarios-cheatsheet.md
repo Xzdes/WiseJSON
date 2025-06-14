@@ -1,12 +1,12 @@
 ```markdown
 docs/05-common-scenarios-cheatsheet.md
-# 05 - Распространенные Сценарии Использования и Шпаргалка
+# 05 - Распространенные Сценарии и Шпаргалка
 
-Этот раздел содержит полные примеры кода для некоторых типичных задач, которые можно решать с помощью WiseJSON DB, а также краткую шпаргалку по основным операциям.
+Этот раздел содержит готовые примеры кода для решения типичных задач с помощью WiseJSON DB, а также краткую и актуальную шпаргалку по основным операциям. Эти сценарии помогут вам быстро интегрировать базу данных в ваши проекты.
 
-## Сценарий 1: Простое Хранилище Пользовательских Профилей
+## Сценарий 1: Хранилище Пользовательских Профилей
 
-**Задача:** Создать приложение, которое хранит профили пользователей (имя, email, возраст), позволяет добавлять новых пользователей, находить их по email и обновлять информацию.
+**Задача:** Создать простое хранилище для профилей пользователей с уникальным email, возможностью поиска, добавления и обновления информации.
 
 ```javascript
 const WiseJSON = require('wise-json-db');
@@ -23,77 +23,56 @@ async function userProfileManagement() {
 
     const profiles = await db.collection('profiles');
     await profiles.initPromise;
-    console.log('Коллекция "profiles" готова.');
-
-    // Для чистоты примера, очистим коллекцию при каждом запуске
-    await profiles.clear();
+    await profiles.clear(); // Очистим для чистоты примера
 
     // Создадим уникальный индекс по email для быстрого поиска и предотвращения дубликатов
     await profiles.createIndex('email', { unique: true });
     console.log('Уникальный индекс по "email" создан.');
 
     // Добавление новых профилей
-    console.log('\nДобавляем профили...');
-    const profile1 = await profiles.insert({
-      name: 'Елена Смирнова',
-      email: 'elena@example.com',
-      age: 28,
-      city: 'Москва'
-    });
-    console.log('Добавлен профиль:', profile1);
+    await profiles.insertMany([
+      { name: 'Елена Смирнова', email: 'elena@example.com', age: 28, city: 'Москва' },
+      { name: 'Алексей Иванов', email: 'alex@example.com', age: 34, city: 'Санкт-Петербург' }
+    ]);
+    console.log('Профили добавлены.');
 
-    const profile2 = await profiles.insert({
-      name: 'Алексей Иванов',
-      email: 'alex@example.com',
-      age: 34,
-      city: 'Санкт-Петербург'
-    });
-    console.log('Добавлен профиль:', profile2);
-
-    // Попытка добавить пользователя с существующим email (вызовет ошибку из-за уникального индекса)
+    // Попытка добавить пользователя с существующим email (вызовет ошибку)
     try {
       await profiles.insert({ name: 'Другая Елена', email: 'elena@example.com', age: 30 });
     } catch (e) {
-      console.log(`\nОжидаемая ошибка: ${e.message}`); // Сообщение о дубликате
+      console.log(`\nОжидаемая ошибка: ${e.message}`); // Сообщение о нарушении уникальности
     }
 
-    // Поиск профиля по email (используя индекс)
+    // Поиск профиля по email (автоматически использует индекс)
     console.log('\nИщем профиль Алексея по email...');
-    const foundAlex = await profiles.findOneByIndexedValue('email', 'alex@example.com');
+    const foundAlex = await profiles.findOne({ email: 'alex@example.com' });
     if (foundAlex) {
       console.log('Найден профиль:', foundAlex);
 
       // Обновление информации в профиле Алексея
-      console.log('\nОбновляем город Алексея...');
-      const updatedAlex = await profiles.update(foundAlex._id, { city: 'Новосибирск', age: 35 });
-      if (updatedAlex) {
-        console.log('Обновленный профиль Алексея:', updatedAlex);
-      }
-    } else {
-      console.log('Профиль Алексея не найден.');
+      console.log('\nОбновляем возраст и город Алексея...');
+      const updatedAlex = await profiles.update(foundAlex._id, { age: 35, city: 'Новосибирск' });
+      console.log('Обновленный профиль Алексея:', updatedAlex);
     }
 
     // Получение всех профилей
     console.log('\nВсе профили в базе:');
     const allProfiles = await profiles.getAll();
-    allProfiles.forEach(p => console.log(`- ${p.name} (${p.email}), ${p.age} лет, город: ${p.city}`));
+    allProfiles.forEach(p => console.log(`- ${p.name}, email: ${p.email}, возраст: ${p.age}`));
 
   } catch (error) {
     console.error('Ошибка в сценарии управления профилями:', error);
   } finally {
-    if (db) {
-      await db.close();
-      console.log('\nБаза данных профилей закрыта.');
-    }
+    if (db) await db.close();
   }
 }
 
 userProfileManagement();
 ```
 
-## Сценарий 2: Логирование Событий с Автоматическим Удалением Старых Логов (TTL)
+## Сценарий 2: Логирование Событий с Автоудалением (TTL)
 
-**Задача:** Записывать события приложения в коллекцию логов. Старые логи (например, старше 7 дней) должны автоматически удаляться.
+**Задача:** Записывать события приложения в коллекцию логов. Старые или временные логи должны автоматически удаляться через заданное время.
 
 ```javascript
 const WiseJSON = require('wise-json-db');
@@ -101,86 +80,44 @@ const path = require('path');
 
 async function eventLoggingWithTTL() {
   const dbPath = path.resolve(__dirname, 'eventLogsDb');
-  let db;
+  // Настроим частую проверку TTL для демонстрации (каждые 3 секунды)
+  const db = new WiseJSON(dbPath, { ttlCleanupIntervalMs: 3000 });
+  await db.init();
+  
+  const eventLogs = await db.collection('event_logs');
+  await eventLogs.initPromise;
+  await eventLogs.clear();
 
-  // Настроим частую проверку TTL для демонстрации (каждые 5 секунд)
-  // В реальном приложении интервал может быть больше (например, раз в час)
-  const dbOptions = {
-    ttlCleanupIntervalMs: 5000 // 5 секунд
-  };
+  console.log('Записываем события...');
+  await eventLogs.insert({
+    level: 'INFO',
+    message: 'Приложение запущено.',
+    ttl: 7 * 24 * 60 * 60 * 1000 // Этот лог будет жить 7 дней
+  });
+  await eventLogs.insert({
+    level: 'DEBUG',
+    message: 'Отладочное сообщение, исчезнет через 5 секунд.',
+    ttl: 5000 // 5 секунд
+  });
 
-  try {
-    db = new WiseJSON(dbPath, dbOptions);
-    await db.init();
-    console.log('База данных логов инициализирована.');
+  console.log(`\nТекущее количество логов: ${await eventLogs.count()}`); // Ожидаем 2
 
-    const eventLogs = await db.collection('event_logs');
-    await eventLogs.initPromise;
-    console.log('Коллекция "event_logs" готова.');
-    // await eventLogs.clear(); // Можно очистить для нового запуска примера
+  console.log('Ожидаем 6 секунд, чтобы отладочный лог истек...');
+  await new Promise(resolve => setTimeout(resolve, 6000));
 
-    // Записываем несколько событий
-    console.log('\nЗаписываем события...');
-    await eventLogs.insert({
-      timestamp: new Date().toISOString(),
-      level: 'INFO',
-      message: 'Приложение запущено.',
-      // Этот лог будет жить 7 дней (в миллисекундах)
-      ttl: 7 * 24 * 60 * 60 * 1000
-    });
+  // TTL очистка произойдет либо по таймеру, либо при следующем чтении (например, count).
+  const countAfterTTL = await eventLogs.count();
+  console.log(`Количество логов после ожидания: ${countAfterTTL}`); // Ожидаем 1
 
-    await eventLogs.insert({
-      timestamp: new Date().toISOString(),
-      level: 'DEBUG',
-      message: 'Отладочное сообщение, исчезнет через 10 секунд.',
-      ttl: 10000 // 10 секунд
-    });
-
-    const criticalEvent = await eventLogs.insert({
-      timestamp: new Date().toISOString(),
-      level: 'ERROR',
-      message: 'Произошла критическая ошибка!',
-      // Этот лог будет жить 30 дней
-      expireAt: Date.now() + 30 * 24 * 60 * 60 * 1000
-    });
-    console.log('События записаны.');
-
-    let currentLogCount = await eventLogs.count();
-    console.log(`\nТекущее количество логов: ${currentLogCount}`); // Ожидаем 3
-
-    console.log('\nОжидаем 12 секунд, чтобы отладочный лог истек...');
-    await new Promise(resolve => setTimeout(resolve, 12000));
-
-    // После ожидания, при следующем обращении к коллекции (например, count или getAll),
-    // или по таймеру ttlCleanupIntervalMs, устаревший лог должен быть удален.
-    currentLogCount = await eventLogs.count();
-    console.log(`Количество логов после ожидания: ${currentLogCount}`); // Ожидаем 2
-
-    console.log('\nОставшиеся логи:');
-    const remainingLogs = await eventLogs.getAll();
-    remainingLogs.forEach(log => console.log(`- [${log.level}] ${log.message}`));
-
-    // Проверим, что критическое событие все еще на месте
-    const foundCriticalEvent = await eventLogs.getById(criticalEvent._id);
-    console.log(`\nКритическое событие найдено: ${!!foundCriticalEvent}`);
-
-
-  } catch (error) {
-    console.error('Ошибка в сценарии логирования событий:', error);
-  } finally {
-    if (db) {
-      await db.close();
-      console.log('\nБаза данных логов закрыта.');
-    }
-  }
+  await db.close();
 }
 
 eventLoggingWithTTL();
 ```
 
-## Сценарий 3: Регистрация Пользователя и Создание Начального Баланса (Транзакция)
+## Сценарий 3: Атомарная Регистрация (Транзакция)
 
-**Задача:** При регистрации нового пользователя необходимо создать запись о нем в коллекции `users` и одновременно создать запись о его начальном балансе (например, 0) в коллекции `balances`. Обе операции должны быть выполнены атомарно.
+**Задача:** При регистрации нового пользователя необходимо создать запись о нем в коллекции `users` и одновременно создать запись о его начальном балансе в коллекции `balances`. Обе операции должны либо выполниться успешно, либо не выполниться вовсе.
 
 ```javascript
 const WiseJSON = require('wise-json-db');
@@ -189,98 +126,56 @@ const { v4: uuidv4 } = require('uuid'); // Для генерации ID
 
 async function userRegistrationWithBalance() {
   const dbPath = path.resolve(__dirname, 'registrationDb');
-  let db;
+  const db = new WiseJSON(dbPath);
+  await db.init();
+
+  const users = await db.collection('users_reg');
+  await users.initPromise;
+  const balances = await db.collection('balances_reg');
+  await balances.initPromise;
+  await users.clear();
+  await balances.clear();
+
+  // Генерируем ID пользователя заранее, так как он нужен для обеих операций
+  const newUserId = uuidv4();
+
+  const txn = db.beginTransaction();
+  console.log(`\nНачинаем транзакцию для регистрации пользователя ${newUserId}...`);
 
   try {
-    db = new WiseJSON(dbPath);
-    await db.init();
-    console.log('База данных регистрации инициализирована.');
+    const txnUsers = txn.collection('users_reg');
+    const txnBalances = txn.collection('balances_reg');
 
-    const users = await db.collection('users_reg');
-    await users.initPromise;
-    const balances = await db.collection('balances_reg');
-    await balances.initPromise;
-    console.log('Коллекции "users_reg" и "balances_reg" готовы.');
+    // Операция 1: Создание пользователя
+    await txnUsers.insert({
+      _id: newUserId,
+      name: 'Новый Пользователь',
+      email: 'newuser@example.com'
+    });
 
-    // Очистим для нового запуска
-    await users.clear();
-    await balances.clear();
+    // Операция 2: Создание начального баланса
+    await txnBalances.insert({
+      userId: newUserId,
+      currency: 'RUB',
+      amount: 0
+    });
 
-    const newUserEmail = 'newuser@example.com';
-    const newUserName = 'Новый Пользователь';
-    // Генерируем ID пользователя заранее, т.к. он нужен для обеих операций в транзакции
-    // и операции в транзакции не возвращают результат до commit.
-    const newUserId = uuidv4();
+    console.log('Применяем транзакцию (commit)...');
+    await txn.commit();
+    console.log('Транзакция регистрации успешно применена.');
 
-    // Начинаем транзакцию
-    const txn = db.beginTransaction();
-    console.log(`\nНачинаем транзакцию для регистрации пользователя ${newUserId}...`);
-
-    try {
-      // Получаем транзакционные обертки для коллекций
-      const txnUsers = txn.collection('users_reg');
-      const txnBalances = txn.collection('balances_reg');
-
-      // Операция 1: Создание пользователя
-      await txnUsers.insert({
-        _id: newUserId,
-        name: newUserName,
-        email: newUserEmail,
-        registeredAt: new Date().toISOString()
-      });
-      console.log(`- Пользователь ${newUserName} (${newUserId}) запланирован к созданию.`);
-
-      // Имитация возможной проверки перед созданием баланса
-      // if (некое_условие_не_выполнено) {
-      //   throw new Error("Не удалось создать баланс, условие не выполнено.");
-      // }
-
-      // Операция 2: Создание начального баланса для пользователя
-      await txnBalances.insert({
-        _id: `balance_${newUserId}`, // Связанный ID баланса
-        userId: newUserId,
-        currency: 'USD',
-        amount: 0, // Начальный баланс
-        createdAt: new Date().toISOString()
-      });
-      console.log(`- Начальный баланс для пользователя ${newUserId} запланирован к созданию.`);
-
-      // Если все операции успешно зарегистрированы, коммитим транзакцию
-      console.log('Применяем транзакцию (commit)...');
-      await txn.commit();
-      console.log('Транзакция регистрации успешно применена.');
-
-    } catch (transactionError) {
-      console.error('\nОшибка внутри транзакции регистрации, откатываем:', transactionError.message);
-      await txn.rollback();
-      console.log('Транзакция отменена (rollback).');
-      // Можно пробросить ошибку дальше, если это требуется логикой приложения
-      // throw transactionError;
-    }
-
-    // Проверяем результаты
-    console.log('\nПроверяем данные после транзакции...');
-    const registeredUser = await users.getById(newUserId);
-    const userBalance = await balances.findOne(b => b.userId === newUserId);
-
-    if (registeredUser && userBalance) {
-      console.log('Зарегистрированный пользователь:', registeredUser);
-      console.log('Баланс пользователя:', userBalance);
-      console.log('Регистрация прошла успешно!');
-    } else if (!registeredUser && !userBalance) {
-      console.log('Пользователь и баланс не созданы (вероятно, был rollback).');
-    } else {
-      console.error('Ошибка: данные неконсистентны! Пользователь или баланс отсутствует.');
-    }
-
-  } catch (error) {
-    console.error('Общая ошибка в сценарии регистрации:', error);
-  } finally {
-    if (db) {
-      await db.close();
-      console.log('\nБаза данных регистрации закрыта.');
-    }
+  } catch (transactionError) {
+    console.error('Ошибка в транзакции, откатываем:', transactionError.message);
+    await txn.rollback();
   }
+
+  // Проверяем, что обе записи были созданы
+  const registeredUser = await users.getById(newUserId);
+  const userBalance = await balances.findOne({ userId: newUserId });
+  console.log('\nПользователь создан:', !!registeredUser);
+  console.log('Баланс создан:', !!userBalance);
+  
+  await db.close();
 }
 
 userRegistrationWithBalance();
@@ -291,45 +186,37 @@ userRegistrationWithBalance();
 | Задача                                        | Метод API / Пример Кода                                                               |
 | :-------------------------------------------- | :------------------------------------------------------------------------------------ |
 | **Инициализация**                             |                                                                                       |
-| Подключить библиотеку                         | `const WiseJSON = require('wise-json-db'); const path = require('path');`            |
-| Создать экземпляр БД                         | `const db = new WiseJSON(path.resolve(__dirname, 'dbName'));`                        |
-| Инициализировать БД                           | `await db.init();`                                                                    |
-| Получить/создать коллекцию                    | `const col = await db.collection('collectionName');`                                 |
-| Дождаться инициализации коллекции             | `await col.initPromise;`                                                              |
+| Подключить библиотеку                         | `const WiseJSON = require('wise-json-db');`                                           |
+| Создать и инициализировать БД                 | `const db = new WiseJSON('path/to/db'); await db.init();`                              |
+| Получить/создать и инициализировать коллекцию | `const col = await db.collection('name'); await col.initPromise;`                      |
 | Закрыть БД (сохранить всё)                    | `await db.close();`                                                                   |
-| **Документы - Создание**                      |                                                                                       |
+| **Документы - Создание (Create)**             |                                                                                       |
 | Вставить один документ                        | `await col.insert({ name: 'A', value: 1 });`                                          |
 | Вставить массив документов                    | `await col.insertMany([{ name: 'B' }, { name: 'C' }]);`                               |
 | Вставить документ с TTL (1 час)               | `await col.insert({ data: 'temp', ttl: 3600000 });`                                  |
-| Вставить документ с временем истечения         | `await col.insert({ data: 'exp', expireAt: Date.now() + 60000 });`                   |
-| **Документы - Чтение**                        |                                                                                       |
+| **Документы - Чтение (Read)**                 |                                                                                       |
 | Получить документ по ID                       | `const doc = await col.getById('someId123');`                                        |
 | Получить все документы                        | `const allDocs = await col.getAll();`                                                 |
-| Найти документы по условию                    | `const results = await col.find(doc => doc.age > 30 && doc.active);`                |
-| Найти один документ по условию                | `const oneResult = await col.findOne(doc => doc.email === 'a@b.c');`                 |
+| Найти документы по условию                    | `await col.find({ age: { $gt: 30 }, status: 'active' });`                             |
+| Найти один документ по условию                | `await col.findOne({ email: 'a@b.c' });`                                              |
 | Подсчитать количество документов              | `const count = await col.count();`                                                    |
-| **Документы - Обновление**                    |                                                                                       |
-| Обновить документ по ID                       | `await col.update('id123', { status: 'completed', score: 100 });`                   |
-| Обновить несколько по условию                 | `await col.updateMany(doc => doc.category === 'X', { processed: true });`            |
-| **Документы - Удаление**                      |                                                                                       |
+| **Документы - Обновление (Update)**           |                                                                                       |
+| Обновить документ по ID (частично)            | `await col.update('id123', { status: 'completed', score: 100 });`                   |
+| Обновить один по фильтру (с операторами)      | `await col.updateOne({ status: 'pending' }, { $set: { status: 'processing' } });`    |
+| Обновить несколько по фильтру                 | `await col.updateMany({ category: 'X' }, { $set: { processed: true } });`            |
+| Найти и обновить (вернуть новый)              | `await col.findOneAndUpdate({ status: 'new' }, { $set: { status: 'claimed' } });`   |
+| **Документы - Удаление (Delete)**             |                                                                                       |
 | Удалить документ по ID                        | `await col.remove('id456');`                                                          |
-| Удалить несколько по условию                  | `await col.removeMany(doc => doc.timestamp < Date.now() - 86400000);`              |
+| Удалить один по фильтру                       | `await col.deleteOne({ status: 'archived' });`                                       |
+| Удалить несколько по фильтру                  | `await col.deleteMany({ timestamp: { $lt: Date.now() - 86400000 } });`              |
 | Очистить всю коллекцию                        | `await col.clear();`                                                                  |
 | **Индексы**                                   |                                                                                       |
 | Создать стандартный индекс                    | `await col.createIndex('fieldName');`                                                  |
-| Создать уникальный индекс                     | `await col.createIndex('uniqueField', { unique: true });`                             |
-| Найти по стандартному индексу                 | `await col.findByIndexedValue('fieldName', 'targetValue');`                           |
-| Найти по уникальному индексу (один)           | `await col.findOneByIndexedValue('uniqueField', 'uniqueValue');`                     |
+| Создать уникальный индекс                     | `await col.createIndex('email', { unique: true });`                                   |
 | Получить список индексов                      | `const indexes = await col.getIndexes();`                                             |
 | Удалить индекс                                | `await col.dropIndex('fieldName');`                                                    |
 | **Транзакции**                                |                                                                                       |
 | Начать транзакцию                             | `const txn = db.beginTransaction();`                                                  |
 | Получить коллекцию в транзакции               | `const txnCol = txn.collection('myCollection');`                                     |
-| Зарегистрировать операцию в транзакции        | `await txnCol.insert({ data: 'in_txn' });`                                            |
-| Применить транзакцию                          | `await txn.commit();`                                                                 |
+| Зарегистрировать операцию и применить         | `await txnCol.insert(...); await txn.commit();`                                       |
 | Откатить транзакцию                           | `await txn.rollback();`                                                               |
-| **Импорт/Экспорт**                            |                                                                                       |
-| Экспорт в JSON                                | `await col.exportJson('backup.json');`                                                |
-| Экспорт в CSV                                 | `await col.exportCsv('backup.csv');`                                                  |
-| Импорт из JSON (добавить)                     | `await col.importJson('data.json');` /* или { mode: 'append' } */                   |
-| Импорт из JSON (заменить)                     | `await col.importJson('data.json', { mode: 'replace' });`                           |

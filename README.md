@@ -98,72 +98,62 @@ async function main() {
   const users = await db.collection('users');
   await users.initPromise; // Wait for the collection itself to initialize
 
+  // Clean up for a predictable run
+  await users.clear();
+
+  // Create indexes for fast queries
+  await users.createIndex('city'); // Standard index
+  await users.createIndex('email', { unique: true }); // Unique index
+  console.log('Indexes created:', await users.getIndexes());
+
   // Insert a single document
-  const user1 = await users.insert({ name: 'Alice', age: 30, city: 'New York' });
-  console.log('Inserted user:', user1);
+  await users.insert({ name: 'Alice', email: 'alice@example.com', age: 30, city: 'New York' });
 
   // Batch insert multiple documents
-  const userBatch = await users.insertMany([
-    { name: 'Bob', age: 24, city: 'London' },
-    { name: 'Charlie', age: 35, city: 'Paris', tags: ['dev', 'cat_lover'] }
+  await users.insertMany([
+    { name: 'Bob', email: 'bob@example.com', age: 24, city: 'London' },
+    { name: 'Charlie', email: 'charlie@example.com', age: 35, city: 'Paris', tags: ['dev', 'cat_lover'] }
   ]);
-  console.log(`Inserted ${userBatch.length} users in batch.`);
+  console.log(`Total users after insert: ${await users.count()}`);
 
-  // Get all documents from the collection
-  const allUsers = await users.getAll();
-  console.log('All users:', allUsers.length);
-
-  // Find documents matching a condition
-  const usersFromLondon = await users.find(user => user.city === 'London');
+  // Find documents using a query object (modern, recommended way)
+  const usersFromLondon = await users.find({ city: 'London' });
   console.log('Users from London:', usersFromLondon);
 
-  // Find a single document
-  const devUser = await users.findOne(user => user.tags && user.tags.includes('dev'));
-  console.log('First developer:', devUser);
+  // Find a single document with operators
+  const devUser = await users.findOne({ tags: 'dev', age: { $gt: 30 } });
+  console.log('First developer over 30:', devUser);
 
-  // Update a document
+  // Update a document by ID
   if (devUser) {
     const updatedDevUser = await users.update(devUser._id, { age: devUser.age + 1, lastLogin: new Date().toISOString() });
     console.log('Updated developer:', updatedDevUser);
   }
 
-  // Batch update documents
-  const updatedCount = await users.updateMany(
-    (user) => user.age > 30, // Condition for update
-    { status: 'senior' }     // Data to update
+  // Batch update documents using a filter and update operators
+  const updateResult = await users.updateMany(
+    { age: { $gte: 25 } },    // Filter: find users 25 or older
+    { $set: { status: 'active' } } // Update operator: set their status
   );
-  console.log(`Updated ${updatedCount} users to senior status.`);
-
-  // Create indexes
-  await users.createIndex('city'); // Standard index
-  await users.createIndex('name', { unique: true }); // Unique index
-
-  // Find by indexed value
-  const usersFromParisByIndex = await users.findByIndexedValue('city', 'Paris');
-  console.log('Users from Paris (by index):', usersFromParisByIndex);
-
-  const bobByName = await users.findOneByIndexedValue('name', 'Bob');
-  console.log('Bob (by unique name index):', bobByName);
-
-  console.log('Current indexes:', await users.getIndexes());
+  console.log(`Updated ${updateResult.modifiedCount} users to active status.`);
 
   // Insert a document with TTL (expires in 5 seconds)
-  const temporaryData = await users.insert({
+  await users.insert({
+    email: 'temp@example.com',
     message: 'This message will self-destruct in 5 seconds',
-    expireAt: Date.now() + 5000 // Exact expiration time
-    // Alternatively, use: ttl: 5000 (in ms from createdAt)
+    ttl: 5000 // in ms from createdAt
   });
-  console.log('Inserted temporary data (ID):', temporaryData._id);
+  console.log('Inserted temporary data.');
 
   // Example of a transaction
   const txn = db.beginTransaction();
   try {
-    const logs = await db.collection('logs'); // Ensure logs collection is available
-    await logs.initPromise;
+    const logsCollection = await db.collection('logs');
+    await logsCollection.initPromise;
 
     // Operations within the transaction
-    await txn.collection('users').insert({ name: 'Diana In Txn', age: 28 });
-    await txn.collection('logs').insert({ action: 'USER_CREATED', user: 'Diana In Txn', timestamp: Date.now() });
+    await txn.collection('users').insert({ name: 'Diana', email: 'diana@example.com', age: 28 });
+    await txn.collection('logs').insert({ action: 'USER_CREATED', user: 'Diana', timestamp: Date.now() });
     
     await txn.commit(); // Apply the transaction
     console.log('Transaction completed successfully.');
@@ -171,9 +161,6 @@ async function main() {
     await txn.rollback(); // Rollback changes in case of an error
     console.error('Transaction error, changes rolled back:', error);
   }
-
-  // Collection statistics
-  console.log('Users collection stats:', await users.stats());
 
   // Close the database (important for saving all data)
   await db.close();
