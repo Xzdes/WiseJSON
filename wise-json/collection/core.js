@@ -326,15 +326,22 @@ class Collection {
   }
 
   _startCheckpointTimer() {
-    this.stopCheckpointTimer();
+    this.stopCheckpointTimer(); // Сначала останавливаем предыдущий, если был
     if (this.options.checkpointIntervalMs > 0) {
         this._checkpointTimerId = setInterval(async () => {
             try {
+                // logger.debug(`[Collection] Auto-checkpoint for ${this.name} triggered by timer.`); // Опциональный debug-лог
                 await this.flushToDisk();
             } catch (e) {
                 logger.error(`[Collection] Ошибка авто-чекпоинта для ${this.name}: ${e.message}`, e.stack);
             }
         }, this.options.checkpointIntervalMs);
+
+        // --- ДОБАВЛЕНО ---
+        if (this._checkpointTimerId && typeof this._checkpointTimerId.unref === 'function') {
+            this._checkpointTimerId.unref();
+        }
+        // --- КОНЕЦ ДОБАВЛЕНИЯ ---
     }
   }
 
@@ -346,15 +353,24 @@ class Collection {
   }
 
   _startTtlCleanupTimer() {
-    this._stopTtlCleanupTimer();
+    this._stopTtlCleanupTimer(); // Сначала останавливаем предыдущий, если был
     if (this.options.ttlCleanupIntervalMs > 0) {
         this._ttlCleanupTimer = setInterval(() => {
             try {
-                cleanupExpiredDocs(this.documents, this._indexManager);
+                const removedCount = cleanupExpiredDocs(this.documents, this._indexManager);
+                if (removedCount > 0 && logger.getLevel() === 'debug') { // Опциональный debug-лог
+                    // logger.debug(`[Collection] [TTL] Auto-cleanup removed ${removedCount} docs from ${this.name}.`);
+                }
             } catch (e) {
                 logger.error(`[Collection] [TTL] Ошибка авто-очистки TTL для ${this.name}: ${e.message}`, e.stack);
             }
         }, this.options.ttlCleanupIntervalMs);
+
+        // --- ДОБАВЛЕНО ---
+        if (this._ttlCleanupTimer && typeof this._ttlCleanupTimer.unref === 'function') {
+            this._ttlCleanupTimer.unref();
+        }
+        // --- КОНЕЦ ДОБАВЛЕНИЯ ---
     }
   }
 
@@ -404,6 +420,7 @@ class Collection {
     this.stopCheckpointTimer();
     this._stopTtlCleanupTimer();
     await this.flushToDisk();
+    await this._releaseLockIfHeld();
   }
 
   stats() {
