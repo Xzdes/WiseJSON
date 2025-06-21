@@ -4,21 +4,10 @@ const fs = require('fs/promises');
 const path = require('path');
 const { isAlive } = require('./ttl.js');
 
-/**
- * Преобразует операцию в строку для WAL.
- * @param {object} entry
- * @returns {string}
- */
 function walEntryToString(entry) {
   return JSON.stringify(entry) + '\n';
 }
 
-/**
- * Читает записи из WAL файла.
- * @param {string} walFile
- * @param {string|null} sinceTimestamp
- * @returns {Promise<object[]>}
- */
 async function readWalEntries(walFile, sinceTimestamp = null) {
   try {
     const raw = await fs.readFile(walFile, 'utf8');
@@ -40,11 +29,26 @@ async function readWalEntries(walFile, sinceTimestamp = null) {
   }
 }
 
-/**
- * Создаёт функции для работы с WAL.
- * @param {object} params
- * @returns {object}
- */
+async function readWal(collection) {
+  if (!collection) {
+    throw new Error('[readWal] В функцию передан undefined/null вместо коллекции. Проверь вызов readWal(this.collection) внутри sync-manager.');
+  }
+  let walPath = null;
+  if (collection._walPath) walPath = collection._walPath;
+  else if (collection.walPath) walPath = collection.walPath;
+  else if (collection._wal && collection._wal.path) walPath = collection._wal.path;
+  else if (collection._wal && collection._wal.walPath) walPath = collection._wal.walPath;
+
+  if (!walPath) {
+    throw new Error(
+      '[readWal] Не удалось определить путь к WAL-файлу коллекции. ' +
+      'Проверь свойства collection._walPath, collection.walPath, collection._wal.path. ' +
+      `Объект collection: ${JSON.stringify(collection, null, 2)}`
+    );
+  }
+  return readWalEntries(walPath, null);
+}
+
 function createWalOps({
   documents,
   indexManager,
@@ -57,17 +61,9 @@ function createWalOps({
   options,
   walPath,
 }) {
-  /**
-   * Применяет запись WAL в память (документы и индексы).
-   * @param {object} entry
-   * @param {boolean} emit
-   */
   function applyWalEntryToMemory(entry, emit = true) {
     if (entry.op === 'INSERT') {
       const doc = entry.doc;
-      // ИЗМЕНЕНИЕ ЗДЕСЬ: Убрана проверка isAlive(doc) при применении INSERT из WAL в память.
-      // Логика TTL должна применяться при чтении или через cleanupExpiredDocs,
-      // а не при первоначальном добавлении в память из WAL.
       if (doc) { 
         documents.set(doc._id, doc);
         _updateIndexesAfterInsert && _updateIndexesAfterInsert(doc);
@@ -76,13 +72,7 @@ function createWalOps({
     } else if (entry.op === 'BATCH_INSERT') {
       const docs = Array.isArray(entry.docs) ? entry.docs : [];
       for (const doc of docs) {
-        // Для BATCH_INSERT оставим проверку isAlive, так как это скорее "оптимизация",
-        // чтобы не обрабатывать сразу мертвые документы из большого батча.
-        // Или можно тоже убрать для полной консистентности с одиночным INSERT.
-        // Пока оставим, так как тесты это не затрагивают напрямую.
-        // Если убирать, то убрать `&& isAlive(doc)` и здесь.
-        // Для большей консистентности - уберем.
-        if (doc) { // Убрали isAlive(doc) и здесь
+        if (doc) {
           documents.set(doc._id, doc);
           _updateIndexesAfterInsert && _updateIndexesAfterInsert(doc);
           if (emit) _emitter.emit('insert', doc);
@@ -102,7 +92,7 @@ function createWalOps({
     } else if (entry.op === 'REMOVE') {
       const id = entry.id;
       const prev = documents.get(id);
-      if (prev) { // Не важно, isAlive или нет, если команда REMOVE пришла, удаляем
+      if (prev) {
         documents.delete(id);
         _updateIndexesAfterRemove && _updateIndexesAfterRemove(prev);
         if (emit) _emitter.emit('remove', prev);
@@ -119,15 +109,6 @@ function createWalOps({
     }
   }
 
-  /**
-   * Записывает операцию в WAL, применяет в памяти, запускает checkpoint и возвращает результат.
-   * Для batch insert и insert проверяет уникальность ДО записи и применения.
-   * @param {object} entry
-   * @param {string} opType
-   * @param {function} getResult
-   * @param {object} extra
-   * @returns {Promise<any>}
-   */
   async function enqueueDataModification(entry, opType, getResult, extra = {}) {
     if (opType === 'INSERT') {
       const docToInsert = entry.doc;
@@ -188,28 +169,23 @@ function createWalOps({
       _triggerCheckpointIfRequired(entry); 
     }
     
-    let prev = null, // Эти переменные не используются в текущей логике getResult для INSERT/BATCH_INSERT
-      next = null;
+    let prev = null, next = null;
     if (opType === 'INSERT') {
       next = entry.doc;
     } else if (opType === 'BATCH_INSERT') {
       next = entry.docs;
     } else if (opType === 'UPDATE') {
-      // prev здесь будет уже обновленным состоянием, если брать из documents.get()
-      // getResult для UPDATE обычно ожидает обновленный документ
       if (documents.has(entry.id)) {
-          const originalDoc = documents.get(entry.id); // Это уже обновленный документ
-          next = originalDoc; // entry.data уже применено в applyWalEntryToMemory
-          // prev для эмиттера событий берется внутри applyWalEntryToMemory до обновления
+          const originalDoc = documents.get(entry.id);
+          next = originalDoc;
       } else {
           next = null;
       }
     } else if (opType === 'REMOVE') {
       // prev для эмиттера событий берется внутри applyWalEntryToMemory
-      // getResult для REMOVE может вернуть boolean или удаленный документ (если он был в entry)
     }
 
-    return getResult ? getResult(undefined, next) : undefined; // Для INSERT/BATCH_INSERT prev не имеет смысла тут
+    return getResult ? getResult(undefined, next) : undefined;
   }
 
   return {
@@ -219,3 +195,4 @@ function createWalOps({
 }
 
 module.exports = createWalOps;
+module.exports.readWal = readWal;

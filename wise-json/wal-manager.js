@@ -1,17 +1,15 @@
-// wise-json/wal-manager.js
-
 const fs = require('fs/promises'); // Используем промисы
 const path = require('path');
 const logger = require('./logger');
 
-// getWalPath, initializeWal, delay - без изменений
+// getWalPath, initializeWal, delay, appendAndSyncWalRecord, appendWalEntry, writeTransactionBlock - без изменений
 
 function getWalPath(collectionDirPath, collectionName) {
     return path.join(collectionDirPath, `wal_${collectionName}.log`);
 }
 
 async function initializeWal(walPath, collectionDirPath) {
-    if (typeof walPath !== 'string') { 
+    if (typeof walPath !== 'string') {
         logger.error(`[WAL Critical] initializeWal: walPath не является строкой! Тип: ${typeof walPath}, Значение: ${walPath}`);
         throw new TypeError('walPath должен быть строкой в initializeWal');
     }
@@ -32,14 +30,14 @@ function delay(ms) {
 }
 
 async function appendAndSyncWalRecord(walPath, text, appendRetries = 5, fsyncRetries = 3, fsyncInitialDelayMs = 100) {
-    const lineToWrite = text + '\n'; 
+    const lineToWrite = text + '\n';
     let lastAppendError = null;
 
     for (let i = 0; i <= appendRetries; i++) {
         try {
             await fs.appendFile(walPath, lineToWrite, 'utf8');
-            lastAppendError = null; 
-            break; 
+            lastAppendError = null;
+            break;
         } catch (err) {
             lastAppendError = err;
             if (i < appendRetries && ['ENOSPC', 'EBUSY', 'EIO', 'EMFILE', 'EAGAIN'].includes(err.code)) {
@@ -48,7 +46,7 @@ async function appendAndSyncWalRecord(walPath, text, appendRetries = 5, fsyncRet
                 continue;
             } else {
                 logger.error(`[WAL] Ошибка appendFile для WAL '${walPath}' (после ${i + 1} попыток): ${lastAppendError?.message}`);
-                throw lastAppendError; 
+                throw lastAppendError;
             }
         }
     }
@@ -57,28 +55,28 @@ async function appendAndSyncWalRecord(walPath, text, appendRetries = 5, fsyncRet
         throw lastAppendError;
     }
 
-    let fileHandle; 
+    let fileHandle;
     let lastSyncError = null;
     let currentFsyncDelay = fsyncInitialDelayMs;
 
     for (let j = 0; j < fsyncRetries; j++) {
-        fileHandle = undefined; // Сбрасываем перед каждой попыткой open
+        fileHandle = undefined;
         try {
-            fileHandle = await fs.open(walPath, 'r+'); 
-            await fileHandle.sync(); // ИЗМЕНЕНИЕ: fsync -> sync
-            lastSyncError = null; 
-            break; 
+            fileHandle = await fs.open(walPath, 'r+');
+            await fileHandle.sync();
+            lastSyncError = null;
+            break;
         } catch (syncErr) {
             lastSyncError = syncErr;
             logger.warn(`[WAL] Ошибка sync для файла ${walPath} (попытка ${j + 1}/${fsyncRetries}): ${syncErr.message}`);
             if (j < fsyncRetries - 1) {
                 await delay(currentFsyncDelay);
-                currentFsyncDelay = Math.min(currentFsyncDelay * 2, 2000); 
+                currentFsyncDelay = Math.min(currentFsyncDelay * 2, 2000);
             }
         } finally {
-            if (fileHandle) { 
+            if (fileHandle) {
                 try {
-                    await fileHandle.close(); // ИЗМЕНЕНИЕ: close остается close
+                    await fileHandle.close();
                 } catch (closeErr) {
                     logger.warn(`[WAL] Ошибка закрытия fileHandle после попытки sync для ${walPath}: ${closeErr.message}`);
                 }
@@ -96,7 +94,7 @@ async function appendWalEntry(walPath, entry) {
     try {
         await appendAndSyncWalRecord(walPath, JSON.stringify(entry));
     } catch (err) {
-        throw err; 
+        throw err;
     }
 }
 
@@ -111,11 +109,11 @@ async function writeTransactionBlock(walPath, txid, ops) {
             col: op.colName,
             type: op.type,
             args: op.args,
-            ts: op.ts || nowISO 
+            ts: op.ts || nowISO
         });
     }
     block.push({ txn: 'commit', id: txid, ts: new Date().toISOString() });
-    
+
     const fullTextBlock = block.map(e => JSON.stringify(e)).join('\n');
 
     try {
@@ -124,6 +122,7 @@ async function writeTransactionBlock(walPath, txid, ops) {
         throw err;
     }
 }
+
 
 async function readWal(walPath, sinceTimestamp = null, options = {}) {
     const effectiveOptions = { strict: false, recover: false, isInitialLoad: false, ...options };
@@ -137,8 +136,8 @@ async function readWal(walPath, sinceTimestamp = null, options = {}) {
 
     const lines = rawContent.trim().split('\n');
     const recoveredEntries = [];
-    const transactionStates = {}; 
-    
+    const transactionStates = {};
+
     let cutoffDateTime = null;
     if (sinceTimestamp) {
         try {
@@ -157,7 +156,7 @@ async function readWal(walPath, sinceTimestamp = null, options = {}) {
         const currentLineNumber = idx + 1;
         if (!line.trim()) continue;
 
-        const MAX_LINE_LEN = 20 * 1024 * 1024; 
+        const MAX_LINE_LEN = 20 * 1024 * 1024;
         if (line.length > MAX_LINE_LEN) {
             const msg = `[WAL] Строка ${currentLineNumber} в ${walPath} превышает лимит длины (${line.length} > ${MAX_LINE_LEN}), пропускается.`;
             if (effectiveOptions.strict) {
@@ -167,23 +166,23 @@ async function readWal(walPath, sinceTimestamp = null, options = {}) {
             logger.warn(msg);
             continue;
         }
-        
+
         let entry;
         try {
             entry = JSON.parse(line);
         } catch (e) {
             const errorContext = `Ошибка парсинга JSON на строке ${currentLineNumber} в ${walPath}: ${e.message}.`;
             const linePreview = line.substring(0, 150) + (line.length > 150 ? '...' : '');
-            
+
             if (typeof effectiveOptions.onError === 'function') {
-                try { effectiveOptions.onError(e, line, currentLineNumber); } 
+                try { effectiveOptions.onError(e, line, currentLineNumber); }
                 catch (userCallbackError) { logger.error(`[WAL] Ошибка в пользовательском onError callback: ${userCallbackError.message}`); }
             }
 
             if (effectiveOptions.strict) {
                 logger.error(errorContext + ` Содержимое (начало): "${linePreview}" (strict mode).`);
                 throw new Error(errorContext + ` (strict mode).`);
-            } 
+            }
             logger.warn(errorContext + ` Содержимое (начало): "${linePreview}" (строка пропущена).`);
             continue;
         }
@@ -192,10 +191,10 @@ async function readWal(walPath, sinceTimestamp = null, options = {}) {
             logger.warn(`[WAL] Запись на строке ${currentLineNumber} в ${walPath} не является объектом. Пропущена.`);
             continue;
         }
-        
+
         if (entry.txn) {
-            const txTimestamp = entry.ts ? Date.parse(entry.ts) : null;
-            const txId = entry.id || entry.txid; 
+            const txTimestampStr = entry.ts;
+            const txId = entry.id || entry.txid;
 
             if (!txId) {
                 logger.warn(`[WAL] Транз. запись '${entry.txn}' без ID на строке ${currentLineNumber}. Игнор.`);
@@ -206,7 +205,7 @@ async function readWal(walPath, sinceTimestamp = null, options = {}) {
                 if (transactionStates[txId]) {
                      logger.warn(`[WAL] Повтор TXN_START '${txId}' на стр ${currentLineNumber}. Старая отменена.`);
                 }
-                transactionStates[txId] = { ops: [], committed: false, startLine: currentLineNumber, timestamp: txTimestamp };
+                transactionStates[txId] = { ops: [], committed: false, startLine: currentLineNumber, timestampStr: txTimestampStr };
             } else if (entry.txn === 'op') {
                 if (!transactionStates[txId] || transactionStates[txId].committed) {
                     continue;
@@ -218,16 +217,25 @@ async function readWal(walPath, sinceTimestamp = null, options = {}) {
                 }
                 transactionStates[txId].committed = true;
                 transactionStates[txId].commitLine = currentLineNumber;
-                transactionStates[txId].commitTimestamp = txTimestamp;
-            } 
-        } else { 
-            const entryTsSource = entry.doc?.updatedAt || (Array.isArray(entry.docs) && entry.docs.length > 0 && entry.docs[0]?.updatedAt);
-            let entryDateTime = entryTsSource ? Date.parse(entryTsSource) : null;
-            if (entryTsSource && isNaN(entryDateTime)) {
-                entryDateTime = null; 
+                transactionStates[txId].commitTimestampStr = txTimestampStr;
             }
+        } else {
+            // Для не-транзакционных записей
+            const entryTsSource = entry.doc?.updatedAt ||
+                                  (Array.isArray(entry.docs) && entry.docs.length > 0 && entry.docs[0]?.updatedAt) ||
+                                  entry.data?.updatedAt || // Для UPDATE операций
+                                  entry.ts; // Общее поле timestamp, если другие отсутствуют
 
-            if (cutoffDateTime && entryDateTime !== null && entryDateTime <= cutoffDateTime) {
+            let entryDateTime = entryTsSource ? Date.parse(entryTsSource) : null;
+
+            if (entryTsSource && isNaN(entryDateTime)) {
+                entryDateTime = null;
+            }
+            
+            // ИСПРАВЛЕНИЕ ЗДЕСЬ:
+            // Если sinceTimestamp не задан (null), мы берем все записи.
+            // Если sinceTimestamp задан, мы берем записи, у которых метка СТРОГО БОЛЬШЕ.
+            if (cutoffDateTime !== null && (entryDateTime === null || entryDateTime <= cutoffDateTime)) {
                 continue;
             }
             recoveredEntries.push(entry);
@@ -237,7 +245,10 @@ async function readWal(walPath, sinceTimestamp = null, options = {}) {
     for (const txid of Object.keys(transactionStates)) {
         const state = transactionStates[txid];
         if (state.committed) {
-            if (cutoffDateTime && state.commitTimestamp && state.commitTimestamp <= cutoffDateTime) {
+            let txCommitDateTime = state.commitTimestampStr ? Date.parse(state.commitTimestampStr) : null;
+            if(state.commitTimestampStr && isNaN(txCommitDateTime)) txCommitDateTime = null;
+
+            if (cutoffDateTime !== null && (txCommitDateTime === null || txCommitDateTime <= cutoffDateTime)) {
                 continue;
             }
             for (const op of state.ops) {
@@ -247,16 +258,17 @@ async function readWal(walPath, sinceTimestamp = null, options = {}) {
             logger.warn(`[WAL] Транзакция ${txid} (начата на строке ${state.startLine}) в ${walPath} не завершена (нет COMMIT) и проигнорирована.`);
         }
     }
-    
+
     const logMsg = `[WAL] Завершено чтение ${walPath}. Обработано строк: ${lines.length}. Записей для применения: ${recoveredEntries.length}.` +
                    (sinceTimestamp ? ` (Фильтр по времени: после ${sinceTimestamp})` : ``);
-    
-    if (effectiveOptions.isInitialLoad) { 
+
+    if (effectiveOptions.isInitialLoad) {
          logger.log(logMsg.replace('[WAL]', '[WAL Init]'));
     }
 
     return recoveredEntries;
 }
+
 
 async function compactWal(walPath, checkpointTimestamp = null) {
     if (!checkpointTimestamp) {
@@ -274,16 +286,19 @@ async function compactWal(walPath, checkpointTimestamp = null) {
         logger.error(`[WAL] Ошибка парсинга checkpointTimestamp '${checkpointTimestamp}' (${e.message}) при компакции WAL ${walPath}. ОТМЕНА.`);
         return;
     }
-    
+
     const allCurrentWalEntries = await readWal(walPath, null, { recover: true, strict: false });
     const entriesToKeep = [];
-    
+
     for (const entry of allCurrentWalEntries) {
         let entryTime = null;
-        if (entry._txn_applied_from_wal && entry.ts) { 
+        if (entry._txn_applied_from_wal && entry.ts) {
             entryTime = Date.parse(entry.ts);
-        } else if (!entry.txn) { 
-             const entryTsSource = entry.doc?.updatedAt || (Array.isArray(entry.docs) && entry.docs.length > 0 && entry.docs[0]?.updatedAt);
+        } else if (!entry.txn) {
+             const entryTsSource = entry.doc?.updatedAt ||
+                                   (Array.isArray(entry.docs) && entry.docs.length > 0 && entry.docs[0]?.updatedAt) ||
+                                   entry.data?.updatedAt ||
+                                   entry.ts;
              entryTime = entryTsSource ? Date.parse(entryTsSource) : null;
         }
 
@@ -291,7 +306,7 @@ async function compactWal(walPath, checkpointTimestamp = null) {
             if (entryTime > checkpointTimeNum) {
                 entriesToKeep.push(entry);
             }
-        } else if (isNaN(entryTime) && (entry.doc?.updatedAt || (Array.isArray(entry.docs) && entry.docs[0]?.updatedAt) || entry.ts)) {
+        } else if (isNaN(entryTime) && (entry.doc?.updatedAt || (Array.isArray(entry.docs) && entry.docs.length > 0 && entry.docs[0]?.updatedAt) || entry.data?.updatedAt || entry.ts)) {
             // logger.warn(`[WAL Compact] Запись с невалидным timestamp в ${walPath} не будет сохранена.`);
         }
     }
@@ -302,21 +317,20 @@ async function compactWal(walPath, checkpointTimestamp = null) {
     });
 
     const newWalContent = cleanEntriesToKeep.map(e => JSON.stringify(e)).join('\n') + (cleanEntriesToKeep.length > 0 ? '\n' : '');
-    
+
     let attempt = 0;
     const maxAttempts = 3;
     while (true) {
         try {
             await fs.writeFile(walPath, newWalContent, 'utf8');
-            let fileHandleCompact; 
+            let fileHandleCompact;
             try {
                 fileHandleCompact = await fs.open(walPath, 'r+');
-                await fileHandleCompact.sync(); // ИЗМЕНЕНИЕ: fsync -> sync
+                await fileHandleCompact.sync();
             } catch (syncErr) {
                 logger.warn(`[WAL] Ошибка sync после перезаписи WAL ${walPath} при компакции: ${syncErr.message}`);
             } finally {
                 if (fileHandleCompact !== undefined) {
-                    // ИЗМЕНЕНИЕ: fileHandleCompact.close() остается, т.к. это метод объекта FileHandle
                     await fileHandleCompact.close().catch(closeErr => logger.warn(`[WAL] Ошибка закрытия fileHandle WAL ${walPath} после sync в compactWal: ${closeErr.message}`));
                 }
             }
@@ -328,7 +342,7 @@ async function compactWal(walPath, checkpointTimestamp = null) {
                 await delay(100 * attempt);
             } else {
                 logger.error(`[WAL] КРИТ. ОШИБКА перезаписи WAL ${walPath} при компакции (после ${maxAttempts} попыток): ${err.message}.`);
-                break; 
+                break;
             }
         }
     }

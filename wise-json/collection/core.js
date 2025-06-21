@@ -1,15 +1,15 @@
-// wise-json/collection/core.js
-
 const path = require('path');
 const fs = require('fs/promises');
+const { v4: uuidv4 } = require('uuid');
 const CollectionEventEmitter = require('./events.js');
 const IndexManager = require('./indexes.js');
 const logger = require('../logger');
-const createCheckpointController = require('./checkpoints.js'); 
+const createCheckpointController = require('./checkpoints.js');
+const SyncManager = require('../sync/sync-manager.js');
 const {
   defaultIdGenerator,
   isNonEmptyString,
-  isPlainObject, 
+  isPlainObject,
   makeAbsolutePath,
 } = require('./utils.js');
 const {
@@ -17,19 +17,19 @@ const {
   readWal,
   getWalPath,
   compactWal,
-} = require('../wal-manager.js'); 
+} = require('../wal-manager.js');
 const {
-  loadLatestCheckpoint, 
-  cleanupOldCheckpoints 
-} = require('../checkpoint-manager.js'); 
+  loadLatestCheckpoint,
+  cleanupOldCheckpoints
+} = require('../checkpoint-manager.js');
 const {
-  cleanupExpiredDocs, 
-  isAlive 
-} = require('./ttl.js'); 
+  cleanupExpiredDocs,
+  isAlive
+} = require('./ttl.js');
 const {
-  acquireCollectionLock, 
-  releaseCollectionLock 
-} = require('./file-lock.js'); 
+  acquireCollectionLock,
+  releaseCollectionLock
+} = require('./file-lock.js');
 const { createWriteQueue } = require('./queue.js');
 
 const crudOps = require('./ops.js');
@@ -38,13 +38,13 @@ const dataExchangeOps = require('./data-exchange.js');
 
 function validateCollectionOptions(opts = {}) {
     const defaults = {
-        maxSegmentSizeBytes: 2 * 1024 * 1024, 
-        checkpointIntervalMs: 5 * 60 * 1000,  
-        ttlCleanupIntervalMs: 60 * 1000,      
-        idGenerator: defaultIdGenerator, 
+        maxSegmentSizeBytes: 2 * 1024 * 1024,
+        checkpointIntervalMs: 5 * 60 * 1000,
+        ttlCleanupIntervalMs: 60 * 1000,
+        idGenerator: defaultIdGenerator,
         checkpointsToKeep: 5,
-        maxWalEntriesBeforeCheckpoint: 1000, 
-        walReadOptions: { recover: false, strict: false } 
+        maxWalEntriesBeforeCheckpoint: 1000,
+        walReadOptions: { recover: false, strict: false }
     };
     const options = { ...defaults, ...opts };
 
@@ -54,7 +54,7 @@ function validateCollectionOptions(opts = {}) {
     if (typeof options.idGenerator !== 'function') options.idGenerator = defaults.idGenerator;
     if (typeof options.checkpointsToKeep !== 'number' || options.checkpointsToKeep < 1) options.checkpointsToKeep = defaults.checkpointsToKeep;
     if (typeof options.maxWalEntriesBeforeCheckpoint !== 'number' || options.maxWalEntriesBeforeCheckpoint < 0) options.maxWalEntriesBeforeCheckpoint = defaults.maxWalEntriesBeforeCheckpoint;
-    
+
     if (typeof options.walReadOptions !== 'object' || options.walReadOptions === null) {
         options.walReadOptions = { ...defaults.walReadOptions };
     } else {
@@ -72,45 +72,46 @@ class Collection {
 
     this.name = name;
     this.dbRootPath = makeAbsolutePath(dbRootPath);
-    this.options = validateCollectionOptions(options); 
-    
+    this.options = validateCollectionOptions(options);
+
     this.collectionDirPath = path.resolve(this.dbRootPath, this.name);
     this.checkpointsDir = path.join(this.collectionDirPath, '_checkpoints');
 
-    this.walPath = getWalPath(this.collectionDirPath, this.name); 
-    
+    this.walPath = getWalPath(this.collectionDirPath, this.name);
+
     this.documents = new Map();
-    this._idGenerator = this.options.idGenerator; 
-    this.isPlainObject = isPlainObject; 
+    this._idGenerator = this.options.idGenerator;
+    this.isPlainObject = isPlainObject;
 
     this._emitter = new CollectionEventEmitter(this.name);
     this._indexManager = new IndexManager(this.name);
-    
+
     this._checkpoint = createCheckpointController({
       collectionName: this.name,
-      collectionDirPath: this.collectionDirPath, 
+      collectionDirPath: this.collectionDirPath,
       documents: this.documents,
       options: this.options,
       getIndexesMeta: () => this._indexManager.getIndexesMeta(),
     });
 
-    this._stats = { 
-        inserts: 0, 
-        updates: 0, 
-        removes: 0, 
-        clears: 0, 
-        walEntriesSinceCheckpoint: 0 
+    this._stats = {
+        inserts: 0,
+        updates: 0,
+        removes: 0,
+        clears: 0,
+        walEntriesSinceCheckpoint: 0
     };
 
     this._lastCheckpointTimestamp = null;
     this._checkpointTimerId = null;
     this._ttlCleanupTimer = null;
-    this._releaseLock = null; 
+    this._releaseLock = null;
+    this.syncManager = null;
 
     createWriteQueue(this);
 
     // --- Привязка методов к экземпляру ---
-    
+
     // CRUD операции
     this.insert = crudOps.insert.bind(this);
     this.insertMany = crudOps.insertMany.bind(this);
@@ -132,7 +133,7 @@ class Collection {
 
     // НОВЫЕ РАСШИРЕННЫЕ МЕТОДЫ
     this.updateOne = queryOps.updateOne.bind(this);
-    this.updateMany = queryOps.updateMany.bind(this); // Переопределяем старый метод на новый, более мощный
+    this.updateMany = queryOps.updateMany.bind(this);
     this.findOneAndUpdate = queryOps.findOneAndUpdate.bind(this);
     this.deleteOne = queryOps.deleteOne.bind(this);
     this.deleteMany = queryOps.deleteMany.bind(this);
@@ -141,14 +142,14 @@ class Collection {
     this.exportJson = dataExchangeOps.exportJson.bind(this);
     this.exportCsv = dataExchangeOps.exportCsv.bind(this);
     this.importJson = dataExchangeOps.importJson.bind(this);
-    
+
     this.initPromise = this._initialize();
   }
-  
+
   _applyWalEntryToMemory(entry, emitEvents = true) {
     if (entry.op === 'INSERT') {
         const doc = entry.doc;
-        if (doc) { 
+        if (doc) {
             this.documents.set(doc._id, doc);
             this._indexManager.afterInsert(doc);
             if (emitEvents) this._emitter.emit('insert', doc);
@@ -156,7 +157,7 @@ class Collection {
     } else if (entry.op === 'BATCH_INSERT') {
         const docs = Array.isArray(entry.docs) ? entry.docs : [];
         for (const doc of docs) {
-            if (doc) { 
+            if (doc) {
                 this.documents.set(doc._id, doc);
                 this._indexManager.afterInsert(doc);
                 if (emitEvents) this._emitter.emit('insert', doc);
@@ -164,28 +165,36 @@ class Collection {
         }
     } else if (entry.op === 'UPDATE') {
         const id = entry.id;
-        const prevDoc = this.documents.get(id); 
-        if (prevDoc && isAlive(prevDoc)) { 
-            const updatedDoc = { ...prevDoc, ...entry.data };
+        const prevDoc = this.documents.get(id);
+        const dataToUpdate = entry.data || entry.doc; // 'doc' для обратной совместимости при слиянии
+        if (prevDoc && isAlive(prevDoc)) {
+            const updatedDoc = { ...prevDoc, ...dataToUpdate };
             this.documents.set(id, updatedDoc);
             this._indexManager.afterUpdate(prevDoc, updatedDoc);
             if (emitEvents) this._emitter.emit('update', updatedDoc, prevDoc);
+        } else if (!prevDoc && entry.op === 'UPDATE') {
+            // Если документ не существует, а операция UPDATE, это может быть
+            // результатом слияния (кто-то создал, а кто-то обновил). Применяем как INSERT.
+            const newDoc = { _id: id, ...dataToUpdate };
+            this.documents.set(id, newDoc);
+            this._indexManager.afterInsert(newDoc);
+            if(emitEvents) this._emitter.emit('insert', newDoc);
         }
     } else if (entry.op === 'REMOVE') {
         const id = entry.id;
         const prevDoc = this.documents.get(id);
-        if (prevDoc) { 
+        if (prevDoc) {
             this.documents.delete(id);
             this._indexManager.afterRemove(prevDoc);
             if (emitEvents) this._emitter.emit('remove', prevDoc);
         }
     } else if (entry.op === 'CLEAR') {
-        const allDocs = Array.from(this.documents.values()); 
-        this.documents.clear(); 
+        const allDocs = Array.from(this.documents.values());
+        this.documents.clear();
         for (const doc of allDocs) {
             this._indexManager.afterRemove(doc);
         }
-        this._indexManager.clearAllData(); 
+        this._indexManager.clearAllData();
         if (emitEvents) this._emitter.emit('clear');
     }
   }
@@ -202,7 +211,7 @@ class Collection {
                     if (valueToInsert !== undefined && valueToInsert !== null) {
                         const index = this._indexManager.indexes.get(fieldName);
                         if (index && index.data && index.data.has(valueToInsert)) {
-                            if (index.data.get(valueToInsert) !== docToInsert._id) { 
+                            if (index.data.get(valueToInsert) !== docToInsert._id) {
                                 throw new Error(`Duplicate value '${valueToInsert}' for unique index '${fieldName}' in insert operation`);
                             }
                         }
@@ -229,11 +238,11 @@ class Collection {
                     }
                 }
             }
-        } else if (opType === 'UPDATE') { 
+        } else if (opType === 'UPDATE') {
             const docId = entry.id;
             const updates = entry.data;
             const originalDoc = this.documents.get(docId);
-            if (originalDoc && updates) { 
+            if (originalDoc && updates) {
                 const uniqueIndexesMeta = (this._indexManager.getIndexesMeta() || []).filter(m => m.type === 'unique');
                 for (const idxMeta of uniqueIndexesMeta) {
                     const fieldName = idxMeta.fieldName;
@@ -251,24 +260,25 @@ class Collection {
             }
         }
     }
-    
-    await require('../wal-manager.js').appendWalEntry(this.walPath, entry);
 
-    this._applyWalEntryToMemory(entry, true); 
+    const entryWithOpId = { ...entry, opId: uuidv4() };
+    await require('../wal-manager.js').appendWalEntry(this.walPath, entryWithOpId);
+
+    this._applyWalEntryToMemory(entry, true);
     this._handlePotentialCheckpointTrigger();
-    
+
     let nextResult = undefined;
     if (opType === 'INSERT') nextResult = entry.doc;
     else if (opType === 'BATCH_INSERT') nextResult = entry.docs;
-    else if (opType === 'UPDATE') nextResult = this.documents.get(entry.id); 
+    else if (opType === 'UPDATE') nextResult = this.documents.get(entry.id);
 
     return getResultFn ? getResultFn(undefined, nextResult) : undefined;
   }
 
   async _initialize() {
     await fs.mkdir(this.collectionDirPath, { recursive: true });
-    await fs.mkdir(this.checkpointsDir, { recursive: true }); 
-    
+    await fs.mkdir(this.checkpointsDir, { recursive: true });
+
     await initializeWal(this.walPath, this.collectionDirPath);
 
     const loadedCheckpoint = await loadLatestCheckpoint(this.checkpointsDir, this.name);
@@ -281,30 +291,30 @@ class Collection {
             this._indexManager.createIndex(indexMeta.fieldName, { unique: indexMeta.type === 'unique' });
         } catch (e) { /* ignore */ }
     }
-    
+
     const walReadOptsWithLoadFlag = {...this.options.walReadOptions, isInitialLoad: true };
     const walEntries = await readWal(this.walPath, loadedCheckpoint.timestamp, walReadOptsWithLoadFlag);
-    
+
     for (const entry of walEntries) {
-      if (entry.txn === 'op' && entry._txn_applied_from_wal) { 
+      if (entry.txn === 'op' && entry._txn_applied_from_wal) {
         await this._applyTransactionWalOp(entry);
-      } else if (!entry.txn) { 
-        this._applyWalEntryToMemory(entry, false); 
+      } else if (!entry.txn) {
+        this._applyWalEntryToMemory(entry, false);
       }
     }
 
-    this._stats.walEntriesSinceCheckpoint = 0; 
-    this._indexManager.rebuildIndexesFromData(this.documents); 
-    
+    this._stats.walEntriesSinceCheckpoint = 0;
+    this._indexManager.rebuildIndexesFromData(this.documents);
+
     this._startCheckpointTimer();
     this._startTtlCleanupTimer();
     this._lastCheckpointTimestamp = loadedCheckpoint.timestamp || null;
     this._emitter.emit('initialized');
-    return true; 
+    return true;
   }
 
   async _acquireLock() {
-    if (this._releaseLock) return; 
+    if (this._releaseLock) return;
     this._releaseLock = await acquireCollectionLock(this.collectionDirPath);
   }
 
@@ -316,7 +326,7 @@ class Collection {
   }
 
   _startCheckpointTimer() {
-    this.stopCheckpointTimer(); 
+    this.stopCheckpointTimer();
     if (this.options.checkpointIntervalMs > 0) {
         this._checkpointTimerId = setInterval(async () => {
             try {
@@ -336,7 +346,7 @@ class Collection {
   }
 
   _startTtlCleanupTimer() {
-    this._stopTtlCleanupTimer(); 
+    this._stopTtlCleanupTimer();
     if (this.options.ttlCleanupIntervalMs > 0) {
         this._ttlCleanupTimer = setInterval(() => {
             try {
@@ -354,12 +364,12 @@ class Collection {
       this._ttlCleanupTimer = null;
     }
   }
-  
-  _handlePotentialCheckpointTrigger() { 
+
+  _handlePotentialCheckpointTrigger() {
     this._stats.walEntriesSinceCheckpoint++;
     if (this.options.maxWalEntriesBeforeCheckpoint > 0 &&
         this._stats.walEntriesSinceCheckpoint >= this.options.maxWalEntriesBeforeCheckpoint) {
-        this.flushToDisk().catch(e => { 
+        this.flushToDisk().catch(e => {
             logger.error(`[Collection] Ошибка авто-чекпоинта (по кол-ву WAL) для ${this.name}: ${e.message}`, e.stack);
         });
     }
@@ -368,18 +378,18 @@ class Collection {
   async flushToDisk() {
     await this._acquireLock();
     try {
-        cleanupExpiredDocs(this.documents, this._indexManager); 
-        const checkpointResult = await this._checkpoint.saveCheckpoint(); 
-        
+        cleanupExpiredDocs(this.documents, this._indexManager);
+        const checkpointResult = await this._checkpoint.saveCheckpoint();
+
         let newTimestamp = null;
         if (checkpointResult && checkpointResult.meta && checkpointResult.meta.timestamp) {
             newTimestamp = checkpointResult.meta.timestamp;
         }
         this._lastCheckpointTimestamp = newTimestamp || new Date().toISOString();
-        this._stats.walEntriesSinceCheckpoint = 0; 
+        this._stats.walEntriesSinceCheckpoint = 0;
 
-        await compactWal(this.walPath, this._lastCheckpointTimestamp); 
-        
+        await compactWal(this.walPath, this._lastCheckpointTimestamp);
+
         if (this.options.checkpointsToKeep > 0) {
             await cleanupOldCheckpoints(this.checkpointsDir, this.name, this.options.checkpointsToKeep);
         }
@@ -390,25 +400,26 @@ class Collection {
   }
 
   async close() {
+    this.disableSync();
     this.stopCheckpointTimer();
     this._stopTtlCleanupTimer();
-    await this.flushToDisk(); 
+    await this.flushToDisk();
   }
 
   stats() {
-    cleanupExpiredDocs(this.documents, this._indexManager); 
+    cleanupExpiredDocs(this.documents, this._indexManager);
     return {
       inserts: this._stats.inserts,
       updates: this._stats.updates,
       removes: this._stats.removes,
       clears: this._stats.clears,
-      count: this.documents.size, 
+      count: this.documents.size,
       walEntriesSinceCheckpoint: this._stats.walEntriesSinceCheckpoint,
     };
   }
 
   async createIndex(fieldName, options = {}) {
-    return this._enqueue(async () => { 
+    return this._enqueue(async () => {
         this._indexManager.createIndex(fieldName, options);
         this._indexManager.rebuildIndexesFromData(this.documents);
         await this.flushToDisk();
@@ -423,7 +434,7 @@ class Collection {
   }
 
   async getIndexes() {
-    return this._indexManager.getIndexesMeta(); 
+    return this._indexManager.getIndexesMeta();
   }
 
   on(eventName, listener) {
@@ -432,6 +443,66 @@ class Collection {
 
   off(eventName, listener) {
     this._emitter.off(eventName, listener);
+  }
+
+  // --- МЕТОДЫ СИНХРОНИЗАЦИИ ---
+
+enableSync(syncOptions) {
+    if (this.syncManager) {
+        logger.warn(`[Sync] Синхронизация для коллекции '${this.name}' уже включена.`);
+        return;
+    }
+    if (!syncOptions || !syncOptions.url || !syncOptions.apiKey) {
+        throw new Error('Для включения синхронизации необходимы `url` и `apiKey`.');
+    }
+    this.syncManager = new SyncManager({ collection: this, ...syncOptions });
+
+    // --- ВАЖНО! Прокидываем события sync наружу! ---
+    this.syncManager.on('sync:error', (...args) => this._emitter.emit('sync:error', ...args));
+    this.syncManager.on('sync:success', (...args) => this._emitter.emit('sync:success', ...args));
+    // ----
+
+    this.syncManager.start();
+}
+
+  disableSync() {
+    if (this.syncManager) {
+        this.syncManager.stop();
+        this.syncManager = null;
+        logger.log(`[Sync] Синхронизация для коллекции '${this.name}' остановлена.`);
+    }
+  }
+
+  async triggerSync() {
+    if (!this.syncManager) {
+        logger.warn(`[Sync] Невозможно запустить синхронизацию для '${this.name}', так как она не включена.`);
+        return Promise.resolve();
+    }
+    return this.syncManager.runSync();
+  }
+
+  getSyncStatus() {
+    if (!this.syncManager) {
+        return { state: 'disabled', isSyncing: false, lastSyncTimestamp: null };
+    }
+    return this.syncManager.getStatus();
+  }
+  
+  async _applyRemoteOperation(remoteOp) {
+    if (!remoteOp || !remoteOp.op) {
+        logger.warn(`[Sync] Получена некорректная удаленная операция:`, remoteOp);
+        return;
+    }
+    
+    // Помечаем операцию как пришедшую извне, чтобы не отправлять ее обратно
+    const entry = { ...remoteOp, _remote: true };
+
+    // Записываем операцию в локальный WAL.
+    // Это гарантирует персистентность удаленных изменений.
+    await require('../wal-manager.js').appendWalEntry(this.walPath, entry);
+
+    // Применяем операцию к данным в памяти.
+    this._applyWalEntryToMemory(entry, true);
   }
 
   async _applyTransactionWalOp(entry) {
@@ -472,9 +543,9 @@ class Collection {
   async _applyTransactionUpdate(id, updates, txid) {
     const oldDoc = this.documents.get(id);
     if (!oldDoc) return null;
-    const { _id, createdAt, _txn, ...restOfUpdates } = updates; 
+    const { _id, createdAt, _txn, ...restOfUpdates } = updates;
     const now = new Date().toISOString();
-    const newDoc = { ...oldDoc, ...restOfUpdates, updatedAt: updates.updatedAt || now, _txn: txid }; 
+    const newDoc = { ...oldDoc, ...restOfUpdates, updatedAt: updates.updatedAt || now, _txn: txid };
     this.documents.set(id, newDoc);
     this._indexManager.afterUpdate(oldDoc, newDoc);
     this._stats.updates++;
@@ -490,13 +561,13 @@ class Collection {
     this._emitter.emit('remove', doc);
     return true;
   }
-  async _applyTransactionClear(txid) { 
+  async _applyTransactionClear(txid) {
     const allDocs = Array.from(this.documents.values());
     this.documents.clear();
     for (const doc of allDocs) {
       this._indexManager.afterRemove(doc);
     }
-    this._indexManager.clearAllData(); 
+    this._indexManager.clearAllData();
     this._stats.clears++;
     this._stats.inserts = 0; this._stats.updates = 0; this._stats.removes = 0;
     this._stats.walEntriesSinceCheckpoint = 0;
