@@ -1,8 +1,9 @@
 {
   "name": "wise-json-db",
-  "version": "5.5.1",
+  "version": "5.6.1",
   "description": "Blazing fast, crash-proof embedded JSON database for Node.js with batch operations, TTL, indexes, and segmented checkpointing.",
-  "main": "wise-json/index.js",
+  "main": "index.js",
+  "type": "commonjs",
   "scripts": {
     "test": "node test/run-all-tests.js",
     "start-explorer": "node explorer/server.js"
@@ -49,6 +50,7 @@
   "homepage": "https://github.com/Xzdes/WiseJSON#readme",
   "files": [
     "wise-json/",
+    "index.js",
     "cli/",
     "explorer/",
     "README.md",
