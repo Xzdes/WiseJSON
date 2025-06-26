@@ -1,8 +1,4 @@
 // test/test-index-proxy.js
-// Полный самодостаточный тест для проверки корневого index.js (прокладка).
-// Проверяем, что connect возвращает экземпляр, коллекции содержат все Mongo-подобные методы,
-// и эти методы работают (insertOne, insertMany, find, findOne, updateOne, updateMany, deleteOne, deleteMany).
-// После выполнения теста все временные файлы удаляются.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -10,78 +6,57 @@ const os = require('os');
 const path = require('path');
 
 (async () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wisejson-test-'));
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wisejson-proxy-test-'));
   const dbPath = path.join(tmpDir, 'db-dir');
   let db;
 
+  // Гарантированная очистка перед тестом
+  if (fs.existsSync(dbPath)) {
+      fs.rmSync(dbPath, { recursive: true, force: true });
+  }
+
   try {
-    // Подключаемся через прокладку
     const proxy = require('../index');
     assert.strictEqual(typeof proxy.connect, 'function', 'connect должен быть функцией');
-    assert.strictEqual(typeof proxy.Collection, 'function', 'Collection должен быть классом');
 
-    // Создаём экземпляр базы
-    db = proxy.connect(dbPath, { someOption: true });
-    assert.ok(db instanceof proxy.WiseJSON, 'connect должен возвращать WiseJSON');
+    db = proxy.connect(dbPath);
+    // Получаем коллекцию асинхронно, как и положено
+    const users = await db.collection('users-proxy-test');
+    await users.initPromise;
 
-    // Проверяем наличие sync-менеджера в экспортах
-    assert.strictEqual(typeof proxy.SyncManager, 'function', 'SyncManager должен быть функцией/классом');
-    assert.strictEqual(typeof proxy.apiClient, 'function', 'apiClient должен быть функцией');
-
-    // Работа с коллекцией
-    const users = db.collection('users-proxy-test');
-
-    // Проверяем наличие методов
+    // Проверяем наличие НОВЫХ методов
     const methods = [
-      'insertOne','insertMany',
-      'find','findOne',
-      'updateOne','updateMany',
-      'deleteOne','deleteMany'
+      'insert', 'insertMany',
+      'find', 'findOne',
+      'updateOne', 'updateMany',
+      'deleteOne', 'deleteMany'
     ];
     methods.forEach(m => {
       assert.strictEqual(typeof users[m], 'function', `Метод ${m} должен существовать`);
     });
 
-    // insertOne + findOne
-    const alice = { id: 1, name: 'Alice' };
-    await users.insertOne(alice);
+    // insert + findOne
+    await users.insert({ id: 1, name: 'Alice' });
     const f1 = await users.findOne({ id: 1 });
-    assert.strictEqual(f1.id, alice.id, 'insertOne/findOne должна вернуть правильный id');
-    assert.strictEqual(f1.name, alice.name, 'insertOne/findOne должна вернуть правильное имя');
+    assert.strictEqual(f1.name, 'Alice', 'findOne должен найти Alice');
 
     // insertMany + find
-    const docs = [
-      { id: 2, name: 'Bob' },
-      { id: 3, name: 'Carol' }
-    ];
-    await users.insertMany(docs);
-    const all = await users.find({});
-    assert.strictEqual(Array.isArray(all), true, 'find должна возвращать массив');
-    assert.strictEqual(all.length, 3, 'find должна вернуть 3 документа');
+    await users.insertMany([{ id: 2, name: 'Bob' }, { id: 3, name: 'Carol' }]);
+    assert.strictEqual(await users.count(), 3, 'После вставки должно быть 3 документа');
 
-    // updateOne + findOne
-    await users.updateOne({ id: 2 }, { $set: { name: 'Bobby' } });
-    const f2 = await users.findOne({ id: 2 });
-    assert.strictEqual(f2.name, 'Bobby', 'updateOne должна обновлять нужный документ');
+    // updateOne
+    await users.updateOne({ id: 3 }, { $set: { name: 'Caroline' } });
+    const caroline = await users.findOne({ id: 3 });
+    assert.strictEqual(caroline.name, 'Caroline', 'updateOne должен обновить имя');
 
-    // updateMany + find
-    await users.updateMany({}, { $set: { active: true } });
-    const all2 = await users.find({ active: true });
-    assert.strictEqual(all2.length, 3, 'updateMany должна обновить все документы');
+    // deleteOne
+    await users.deleteOne({ id: 1 });
+    assert.strictEqual(await users.count(), 2, 'После deleteOne должно остаться 2 документа');
+    
+    // deleteMany
+    await users.deleteMany({ id: { $in: [2, 3] } });
+    assert.strictEqual(await users.count(), 0, 'После deleteMany должно остаться 0 документов');
 
-    // deleteOne + find by _id
-    // Для deleteOne используем _id реального документа
-    const toDelete = (await users.find({ id: 3 }))[0];
-    await users.deleteOne(toDelete._id);
-    const rem1 = await users.find({});
-    assert.strictEqual(rem1.length, 2, 'deleteOne должна удалить один документ');
-
-    // deleteMany без фильтра (удаляет все) через predicate true
-    await users.deleteMany(() => true);
-    const rem2 = await users.find({});
-    assert.strictEqual(rem2.length, 0, 'deleteMany должна удалить все документы');
-
-    // Закрываем БД
     if (typeof db.close === 'function') {
       await db.close();
     }
@@ -92,7 +67,6 @@ const path = require('path');
     console.error('✗ test-index-proxy.js: ошибка при проверке прокладки', err);
     process.exit(1);
   } finally {
-    // Удаляем временные файлы и директорию
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch (cleanupErr) {

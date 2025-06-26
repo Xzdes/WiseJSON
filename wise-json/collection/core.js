@@ -79,6 +79,7 @@ class Collection {
     this.collectionDirPath = path.resolve(this.dbRootPath, this.name);
     this.checkpointsDir = path.join(this.collectionDirPath, '_checkpoints');
     this.walPath = getWalPath(this.collectionDirPath, this.name);
+    this.quarantinePath = path.join(this.collectionDirPath, `quarantine_${this.name}.log`);
 
     this.documents = new Map();
     this._idGenerator = this.options.idGenerator;
@@ -103,7 +104,6 @@ class Collection {
 
     createWriteQueue(this);
 
-    // --- Binding API methods to the instance ---
     this._bindApiMethods();
 
     this.initPromise = this._initialize();
@@ -161,11 +161,12 @@ class Collection {
     const walReadOptsWithLoadFlag = { ...this.options.walReadOptions, isInitialLoad: true };
     const walEntries = await readWal(this.walPath, this._stats.lastCheckpointTimestamp, walReadOptsWithLoadFlag);
 
+    const isInitialLoad = true;
     for (const entry of walEntries) {
       if (entry.txn === 'op' && entry._txn_applied_from_wal) {
-        await this._applyTransactionWalOp(entry);
+        await this._applyTransactionWalOp(entry, isInitialLoad);
       } else if (!entry.txn) {
-        this._applyWalEntryToMemory(entry, false);
+        this._applyWalEntryToMemory(entry, false, isInitialLoad);
       }
     }
 
@@ -179,48 +180,67 @@ class Collection {
     return true;
   }
 
-  _applyWalEntryToMemory(entry, emitEvents = true) {
-    switch(entry.op) {
+  _applyWalEntryToMemory(entry, emitEvents = true, isInitialLoad = false) {
+    switch (entry.op) {
         case 'INSERT': {
             const doc = entry.doc;
-            if (doc) {
+            if (!doc || !doc._id) throw new Error('Cannot apply INSERT: document or _id is missing.');
+            if (!isInitialLoad && this.documents.has(doc._id)) {
+                throw new Error(`Cannot apply INSERT: document with _id ${doc._id} already exists.`);
+            }
+            this.documents.set(doc._id, doc);
+            this._indexManager.afterInsert(doc);
+            if (emitEvents) this._emitter.emit('insert', doc);
+            break;
+        }
+        case 'BATCH_INSERT': {
+            const docs = Array.isArray(entry.docs) ? entry.docs : [];
+            if (!isInitialLoad) {
+                for (const doc of docs) {
+                    if (!doc || !doc._id) throw new Error('Cannot apply BATCH_INSERT: a document or its _id is missing.');
+                    if (this.documents.has(doc._id)) throw new Error(`Cannot apply BATCH_INSERT: document with _id ${doc._id} already exists.`);
+                }
+            }
+            for (const doc of docs) {
                 this.documents.set(doc._id, doc);
                 this._indexManager.afterInsert(doc);
                 if (emitEvents) this._emitter.emit('insert', doc);
             }
             break;
         }
-        case 'BATCH_INSERT': {
-            const docs = Array.isArray(entry.docs) ? entry.docs : [];
-            for (const doc of docs) {
-                if (doc) {
-                    this.documents.set(doc._id, doc);
-                    this._indexManager.afterInsert(doc);
-                    if (emitEvents) this._emitter.emit('insert', doc);
-                }
-            }
-            break;
-        }
         case 'UPDATE': {
             const id = entry.id;
-            const prevDoc = this.documents.get(id);
             const dataToUpdate = entry.data;
-            if (prevDoc && isAlive(prevDoc)) {
-                const updatedDoc = { ...prevDoc, ...dataToUpdate };
-                this.documents.set(id, updatedDoc);
-                this._indexManager.afterUpdate(prevDoc, updatedDoc);
-                if (emitEvents) this._emitter.emit('update', updatedDoc, prevDoc);
+            if (!id) throw new Error('Cannot apply UPDATE: id is missing.');
+            const prevDoc = this.documents.get(id);
+
+            if (!prevDoc) {
+                if (isInitialLoad && dataToUpdate) {
+                    const newDoc = { _id: id, createdAt: new Date().toISOString(), ...dataToUpdate, updatedAt: dataToUpdate.updatedAt || new Date().toISOString() };
+                    this.documents.set(id, newDoc);
+                    this._indexManager.afterInsert(newDoc);
+                    if(emitEvents) this._emitter.emit('insert', newDoc);
+                    return;
+                }
+                throw new Error(`Cannot apply UPDATE: document with id ${id} not found.`);
             }
+            
+            if (!isAlive(prevDoc)) throw new Error(`Cannot apply UPDATE: document with id ${id} has expired.`);
+            const updatedDoc = { ...prevDoc, ...dataToUpdate };
+            this.documents.set(id, updatedDoc);
+            this._indexManager.afterUpdate(prevDoc, updatedDoc);
+            if (emitEvents) this._emitter.emit('update', updatedDoc, prevDoc);
             break;
         }
         case 'REMOVE': {
             const id = entry.id;
+            if (!id) throw new Error('Cannot apply REMOVE: id is missing.');
             const prevDoc = this.documents.get(id);
-            if (prevDoc) {
-                this.documents.delete(id);
-                this._indexManager.afterRemove(prevDoc);
-                if (emitEvents) this._emitter.emit('remove', prevDoc);
-            }
+            if (!prevDoc) return;
+
+            this.documents.delete(id);
+            this._indexManager.afterRemove(prevDoc);
+            if (emitEvents) this._emitter.emit('remove', prevDoc);
             break;
         }
         case 'CLEAR': {
@@ -230,11 +250,12 @@ class Collection {
             if (emitEvents) this._emitter.emit('clear', { clearedCount: allDocs.length });
             break;
         }
+        default:
+            throw new Error(`Unknown operation type: ${entry.op}`);
     }
   }
 
   async _enqueueDataModification(entry, opType, getResultFn) {
-    // Upfront uniqueness checks
     if (this._indexManager) {
         if (opType === 'INSERT') {
             const docToInsert = entry.doc;
@@ -242,7 +263,7 @@ class Collection {
                 for (const idxMeta of this._indexManager.getIndexesMeta()) {
                     if (idxMeta.type === 'unique') {
                         const value = docToInsert[idxMeta.fieldName];
-                        if (value !== undefined && this._indexManager.findOneIdByIndex(idxMeta.fieldName, value)) {
+                        if (value !== undefined && value !== null && this._indexManager.findOneIdByIndex(idxMeta.fieldName, value)) {
                             throw new Error(`Duplicate value '${value}' for unique index '${idxMeta.fieldName}'`);
                         }
                     }
@@ -256,7 +277,7 @@ class Collection {
                         const seenValues = new Set();
                         for (const doc of docs) {
                             const value = doc[idxMeta.fieldName];
-                            if (value !== undefined) {
+                            if (value !== undefined && value !== null) {
                                 if (seenValues.has(value) || this._indexManager.findOneIdByIndex(idxMeta.fieldName, value)) {
                                     throw new Error(`Duplicate value '${value}' for unique index '${idxMeta.fieldName}' in batch insert`);
                                 }
@@ -273,9 +294,11 @@ class Collection {
                 for (const idxMeta of this._indexManager.getIndexesMeta()) {
                     if (idxMeta.type === 'unique' && data.hasOwnProperty(idxMeta.fieldName)) {
                         const newValue = data[idxMeta.fieldName];
-                        const existingId = this._indexManager.findOneIdByIndex(idxMeta.fieldName, newValue);
-                        if (existingId && existingId !== id) {
-                            throw new Error(`Duplicate value '${newValue}' for unique index '${idxMeta.fieldName}' in update`);
+                        if (newValue !== undefined && newValue !== null) {
+                            const existingId = this._indexManager.findOneIdByIndex(idxMeta.fieldName, newValue);
+                            if (existingId && existingId !== id) {
+                                throw new Error(`Duplicate value '${newValue}' for unique index '${idxMeta.fieldName}' in update`);
+                            }
                         }
                     }
                 }
@@ -384,15 +407,13 @@ class Collection {
         const metaPath = path.join(this.checkpointsDir, `checkpoint_meta_${this.name}_${timestampForFile}.json`);
         await writeJsonFileSafe(metaPath, meta);
 
-        // Segmented data write
         const aliveDocs = Array.from(this.documents.values());
         const maxSegmentSize = this.options.maxSegmentSizeBytes;
         let segmentIndex = 0;
-        for (let i = 0; i < aliveDocs.length; i += 1000) { // Chunking for memory efficiency
+        for (let i = 0; i < aliveDocs.length; i += 1000) {
             let currentSegment = [];
-            let currentSize = 2; // for "[]"
+            let currentSize = 2;
             const chunk = aliveDocs.slice(i, Math.min(i + 1000, aliveDocs.length));
-
             for(const doc of chunk) {
                 const docStr = JSON.stringify(doc);
                 const docSize = Buffer.byteLength(docStr, 'utf8') + (currentSegment.length > 0 ? 1 : 0);
@@ -441,20 +462,16 @@ class Collection {
     };
   }
   
-  // ИСПРАВЛЕНИЕ: Убрали вызов flushToDisk из createIndex
   async createIndex(fieldName, options = {}) {
     return this._enqueue(async () => {
         this._indexManager.createIndex(fieldName, options);
         this._indexManager.rebuildIndexesFromData(this.documents);
-        // await this.flushToDisk(); // ЭТА СТРОКА УДАЛЕНА
     });
   }
 
-  // ИСПРАВЛЕНИЕ: Убрали вызов flushToDisk из dropIndex
   async dropIndex(fieldName) {
     return this._enqueue(async () => {
         this._indexManager.dropIndex(fieldName);
-        // await this.flushToDisk(); // ЭТА СТРОКА УДАЛЕНА
     });
   }
 
@@ -469,6 +486,17 @@ class Collection {
   off(eventName, listener) {
     this._emitter.off(eventName, listener);
   }
+  
+  async compactWalAfterPush() {
+    return this._enqueue(async () => {
+        try {
+            await fs.writeFile(this.walPath, '', 'utf8');
+            logger.log(`[Collection] WAL for '${this.name}' compacted after successful sync push.`);
+        } catch(err) {
+            logger.error(`[Collection] Failed to compact WAL for '${this.name}' after push: ${err.message}`);
+        }
+    });
+  }
 
   // --- SYNC METHODS ---
 
@@ -482,15 +510,15 @@ class Collection {
         throw new Error('Sync requires `url` and `apiKey`.');
     }
     this.syncManager = new SyncManager({ collection: this, ...syncOptions });
-
-    this.syncManager.on('sync:start', (...args) => this._emitter.emit('sync:start', ...args));
-    this.syncManager.on('sync:success', (...args) => this._emitter.emit('sync:success', ...args));
-    this.syncManager.on('sync:error', (...args) => this._emitter.emit('sync:error', ...args));
-    this.syncManager.on('sync:push_success', (...args) => this._emitter.emit('sync:push_success', ...args));
-    this.syncManager.on('sync:pull_success', (...args) => this._emitter.emit('sync:pull_success', ...args));
-    this.syncManager.on('sync:initial_start', (...args) => this._emitter.emit('sync:initial_start', ...args));
-    this.syncManager.on('sync:initial_complete', (...args) => this._emitter.emit('sync:initial_complete', ...args));
-    this.syncManager.on('sync:conflict_resolved', (...args) => this._emitter.emit('sync:conflict_resolved', ...args));
+    
+    const eventsToForward = [
+        'sync:start', 'sync:success', 'sync:error', 'sync:push_success',
+        'sync:pull_success', 'sync:initial_start', 'sync:initial_complete',
+        'sync:conflict_resolved', 'sync:quarantine', 'sync:heartbeat_success'
+    ];
+    eventsToForward.forEach(eventName => {
+        this.syncManager.on(eventName, (...args) => this._emitter.emit(eventName, ...args));
+    });
 
     this.syncManager.start();
   }
@@ -513,16 +541,11 @@ class Collection {
 
   getSyncStatus() {
     if (!this.syncManager) {
-        return { state: 'disabled', isSyncing: false, lastSyncTimestamp: null, initialSyncComplete: false };
+        return { state: 'disabled', isSyncing: false, lastKnownServerLSN: 0, initialSyncComplete: false };
     }
     return this.syncManager.getStatus();
   }
 
-  /**
-   * @internal
-   * Внутренний метод для полной очистки коллекции без записи в WAL.
-   * Используется для начальной синхронизации.
-   */
   async _internalClear() {
     return this._enqueue(async () => {
         const clearedCount = this.documents.size;
@@ -532,12 +555,6 @@ class Collection {
     });
   }
 
-  /**
-   * @internal
-   * Внутренний метод для массовой вставки документов без записи в WAL.
-   * Используется для начальной синхронизации.
-   * @param {Array<object>} docs - Массив документов для вставки.
-   */
   async _internalInsertMany(docs) {
     return this._enqueue(async () => {
         for (const doc of docs) {
@@ -551,12 +568,6 @@ class Collection {
     });
   }
 
-  /**
-   * Применяет операцию, полученную с удаленного сервера.
-   * Включает логику разрешения конфликтов "Last Write Wins".
-   * @param {object} remoteOp - Операция, полученная с сервера.
-   * @internal
-   */
   async _applyRemoteOperation(remoteOp) {
     if (!remoteOp || !remoteOp.op) {
         logger.warn(`[Sync] Received invalid remote operation:`, remoteOp);
@@ -574,39 +585,61 @@ class Collection {
             
             if (localTimestamp > remoteTimestamp) {
                 this._emitter.emit('sync:conflict_resolved', {
-                    type: 'ignored_remote',
-                    reason: 'local_is_newer',
-                    docId: docId,
-                    localTimestamp: localDoc.updatedAt,
-                    remoteTimestamp: remoteTimestampStr
+                    type: 'ignored_remote', reason: 'local_is_newer', docId,
+                    localTimestamp: localDoc.updatedAt, remoteTimestamp: remoteTimestampStr
                 });
                 return;
             }
         } catch (e) {
-            logger.warn(`[Sync] Could not parse timestamp for conflict resolution. Applying remote op. Error: ${e.message}`);
+            logger.warn(`[Sync] Could not parse timestamp for conflict resolution. Error: ${e.message}`);
         }
     }
 
-    const entry = { ...remoteOp, _remote: true };
-    await require('../wal-manager.js').appendWalEntry(this.walPath, entry);
-    this._applyWalEntryToMemory(entry, true);
+    try {
+        this._applyWalEntryToMemory(remoteOp, true, false);
+        const entry = { ...remoteOp, _remote: true };
+        await require('../wal-manager.js').appendWalEntry(this.walPath, entry);
+    } catch (err) {
+        logger.error(`[Sync] Failed to apply remote op. Quarantining. Op: ${JSON.stringify(remoteOp)}`, err.message);
+        await this._quarantineOperation(remoteOp, err);
+    }
+  }
+  
+  async _quarantineOperation(op, error) {
+      const quarantineEntry = {
+          quarantinedAt: new Date().toISOString(),
+          operation: op,
+          error: {
+              message: error.message,
+              stack: error.stack,
+          },
+      };
+      try {
+          await fs.appendFile(this.quarantinePath, JSON.stringify(quarantineEntry) + '\n', 'utf8');
+          this._emitter.emit('sync:quarantine', quarantineEntry);
+      } catch (qErr) {
+          logger.error(`[Sync] CRITICAL: Failed to write to quarantine log file at ${this.quarantinePath}`, qErr);
+      }
   }
 
   // --- TRANSACTION METHODS ---
 
-  async _applyTransactionWalOp(entry) {
+  async _applyTransactionWalOp(entry, isInitialLoad = false) {
     const txidForLog = entry.txid || entry.id || 'unknown_txid';
     switch (entry.type) {
-      case 'insert': await this._applyTransactionInsert(entry.args[0], txidForLog); break;
-      case 'insertMany': await this._applyTransactionInsertMany(entry.args[0], txidForLog); break;
-      case 'update': await this._applyTransactionUpdate(entry.args[0], entry.args[1], txidForLog); break;
-      case 'remove': await this._applyTransactionRemove(entry.args[0], txidForLog); break;
-      case 'clear': await this._applyTransactionClear(txidForLog); break;
+      case 'insert': await this._applyTransactionInsert(entry.args[0], txidForLog, isInitialLoad); break;
+      case 'insertMany': await this._applyTransactionInsertMany(entry.args[0], txidForLog, isInitialLoad); break;
+      case 'update': await this._applyTransactionUpdate(entry.args[0], entry.args[1], txidForLog, isInitialLoad); break;
+      case 'remove': await this._applyTransactionRemove(entry.args[0], txidForLog, isInitialLoad); break;
+      case 'clear': await this._applyTransactionClear(txidForLog, isInitialLoad); break;
       default: logger.warn(`[Collection] Unknown transactional WAL op type '${entry.type}' for ${this.name}, txid: ${txidForLog}`);
     }
   }
-  async _applyTransactionInsert(docData, txid) {
+  async _applyTransactionInsert(docData, txid, isInitialLoad = false) {
     const _id = docData._id || this._idGenerator();
+    if (!isInitialLoad && this.documents.has(_id)) {
+        throw new Error(`Cannot apply transaction insert: document with _id ${_id} already exists.`);
+    }
     const now = new Date().toISOString();
     const finalDoc = { ...docData, _id, createdAt: docData.createdAt || now, updatedAt: docData.updatedAt || now, _txn: txid };
     this.documents.set(_id, finalDoc);
@@ -615,7 +648,13 @@ class Collection {
     this._emitter.emit('insert', finalDoc);
     return finalDoc;
   }
-  async _applyTransactionInsertMany(docsData, txid) {
+  async _applyTransactionInsertMany(docsData, txid, isInitialLoad = false) {
+    if (!isInitialLoad) {
+        for(const docData of docsData) {
+            const _id = docData._id || this._idGenerator();
+            if(this.documents.has(_id)) throw new Error(`Cannot apply transaction insertMany: document with _id ${_id} already exists.`);
+        }
+    }
     const now = new Date().toISOString();
     const insertedDocs = [];
     for (const docData of docsData) {
@@ -629,9 +668,11 @@ class Collection {
     }
     return insertedDocs;
   }
-  async _applyTransactionUpdate(id, updates, txid) {
+  async _applyTransactionUpdate(id, updates, txid, isInitialLoad = false) {
     const oldDoc = this.documents.get(id);
+    if (!oldDoc && !isInitialLoad) throw new Error(`Cannot apply transaction update: document with id ${id} not found.`);
     if (!oldDoc) return null;
+    
     const { _id, createdAt, ...restOfUpdates } = updates;
     const now = new Date().toISOString();
     const newDoc = { ...oldDoc, ...restOfUpdates, updatedAt: updates.updatedAt || now, _txn: txid };
@@ -641,7 +682,7 @@ class Collection {
     this._emitter.emit('update', newDoc, oldDoc);
     return newDoc;
   }
-  async _applyTransactionRemove(id, txid) {
+  async _applyTransactionRemove(id, txid, isInitialLoad = false) {
     const doc = this.documents.get(id);
     if (!doc) return false;
     this.documents.delete(id);
@@ -650,7 +691,7 @@ class Collection {
     this._emitter.emit('remove', doc);
     return true;
   }
-  async _applyTransactionClear(txid) {
+  async _applyTransactionClear(txid, isInitialLoad = false) {
     const clearedCount = this.documents.size;
     this.documents.clear();
     this._indexManager.clearAllData();

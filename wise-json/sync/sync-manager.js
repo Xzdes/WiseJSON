@@ -1,51 +1,75 @@
 // wise-json/sync/sync-manager.js
 
+const { v4: uuidv4 } = require('uuid');
 const EventEmitter = require('events');
-const { readWal } = require('../wal-manager.js'); // Зависимость от wal-manager, а не wal-ops
+const { readWal } = require('../wal-manager.js');
 const logger = require('../logger');
 
 /**
- * SyncManager отвечает за двустороннюю синхронизацию коллекции с удалённым сервером.
- * Управляет полным жизненным циклом: начальная загрузка, отправка (push) и получение (pull) изменений.
+ * SyncManager - orchestrates robust, two-way synchronization with a remote server.
+ * Implements an advanced sync strategy including LSN-based delta sync, push batching,
+ * adaptive intervals, heartbeats, and idempotent pushes.
  */
 class SyncManager extends EventEmitter {
     /**
      * @param {object} params
-     * @param {import('../collection/core')} params.collection - Экземпляр коллекции.
-     * @param {object} params.apiClient - Клиент для общения с сервером.
-     * @param {number} [params.syncIntervalMs=10000] - Интервал между попытками синхронизации.
-     * @param {number} [params.pushBatchSize=100] - Максимальный размер пакета операций для отправки на сервер.
+     * @param {import('../collection/core')} params.collection - The collection instance to sync.
+     * @param {object} params.apiClient - The API client for server communication.
+     * @param {number} [params.minSyncIntervalMs=5000] - The base interval for sync attempts.
+     * @param {number} [params.maxSyncIntervalMs=60000] - The maximum interval for adaptive backoff.
+     * @param {number} [params.heartbeatIntervalMs=30000] - How often to send a heartbeat if no other activity.
+     * @param {number} [params.pushBatchSize=100] - The maximum number of operations to push in a single batch.
+     * @param {boolean} [params.autoStartLoop=true] - Whether to start the sync loop automatically.
      */
-    constructor({ collection, apiClient, syncIntervalMs = 10000, pushBatchSize = 100 }) {
+    constructor({
+        collection,
+        apiClient,
+        minSyncIntervalMs = 5000,
+        maxSyncIntervalMs = 60000,
+        heartbeatIntervalMs = 30000,
+        pushBatchSize = 100,
+        autoStartLoop = true, // Новая опция для контроля в тестах
+    }) {
         super();
-        if (!collection) {
-            throw new Error('SyncManager requires a "collection" instance.');
+        if (!collection || !apiClient) {
+            throw new Error('SyncManager requires both "collection" and "apiClient" instances.');
         }
+
         this.collection = collection;
         this.apiClient = apiClient;
-        this.syncIntervalMs = syncIntervalMs;
         this.pushBatchSize = pushBatchSize;
+        this.minSyncIntervalMs = minSyncIntervalMs;
+        this.maxSyncIntervalMs = maxSyncIntervalMs;
+        this.heartbeatIntervalMs = heartbeatIntervalMs;
+        this.autoStartLoop = autoStartLoop;
 
-        this.lastSyncTimestamp = null;
-        this._state = 'idle'; // idle, syncing, error
-        this._initialSyncComplete = false;
-        this._timer = null;
+        this._state = 'stopped'; // stopped, idle, syncing, error
         this._isSyncing = false;
+        this._initialSyncComplete = false;
+        this._timeoutId = null;
+
+        // State properties
+        this.lastKnownServerLSN = 0;
+        this.currentInterval = this.minSyncIntervalMs;
+        this.lastActivityTime = Date.now();
     }
 
     start() {
-        if (this._timer) return;
+        if (this._state !== 'stopped') return;
+        logger.log(`[SyncManager] Starting for collection '${this.collection.name}'.`);
         this._state = 'idle';
-        this._timer = setInterval(() => this.runSync(), this.syncIntervalMs);
-        this.runSync(); // Первый запуск сразу
+        if (this.autoStartLoop) {
+            this._runLoop();
+        }
     }
 
     stop() {
-        this._state = 'stopped';
-        if (this._timer) {
-            clearInterval(this._timer);
-            this._timer = null;
+        if (this._timeoutId) {
+            clearTimeout(this._timeoutId);
+            this._timeoutId = null;
         }
+        this._state = 'stopped';
+        logger.log(`[SyncManager] Stopped for collection '${this.collection.name}'.`);
     }
 
     getStatus() {
@@ -53,7 +77,8 @@ class SyncManager extends EventEmitter {
             state: this._state,
             isSyncing: this._isSyncing,
             initialSyncComplete: this._initialSyncComplete,
-            lastSyncTimestamp: this.lastSyncTimestamp,
+            lastKnownServerLSN: this.lastKnownServerLSN,
+            currentInterval: this.currentInterval,
         };
     }
 
@@ -66,31 +91,57 @@ class SyncManager extends EventEmitter {
         this._isSyncing = false;
     }
 
+    _runLoop() {
+        if (this._state === 'stopped') return;
+
+        this.runSync().finally(() => {
+            if (this._state !== 'stopped' && this.autoStartLoop) {
+                this._timeoutId = setTimeout(() => this._runLoop(), this.currentInterval);
+            }
+        });
+    }
+
     async _doSync() {
         this._state = 'syncing';
-        this.emit('sync:start');
+        this.emit('sync:start', { lsn: this.lastKnownServerLSN });
 
         try {
-            // Этап 1: Начальная полная синхронизация (если требуется)
+            // Step 1: Initial full sync (if needed)
             if (!this._initialSyncComplete) {
                 await this._performInitialSync();
                 this._initialSyncComplete = true;
             }
 
-            // Этап 2: PUSH локальных изменений пакетами
-            await this._performPush();
+            // Step 2: PULL changes from the server first to reduce conflicts
+            const pullActivity = await this._performPull();
 
-            // Этап 3: PULL дельта-изменений с сервера
-            await this._performPull();
+            // Step 3: PUSH local changes to the server in batches
+            const pushActivity = await this._performPush();
+            
+            // Step 4: Perform a heartbeat if there's no activity
+            const activityDetected = pullActivity || pushActivity;
+            if (!activityDetected && Date.now() - this.lastActivityTime > this.heartbeatIntervalMs) {
+                await this._performHeartbeat();
+            }
+
+            // Step 5: Adjust sync interval based on activity
+            if (activityDetected) {
+                this.currentInterval = this.minSyncIntervalMs;
+                this.lastActivityTime = Date.now();
+            } else {
+                this.currentInterval = Math.min(this.currentInterval * 1.5, this.maxSyncIntervalMs);
+            }
 
             this._state = 'idle';
             this.emit('sync:success', {
                 type: 'full_cycle_complete',
-                timestamp: this.lastSyncTimestamp,
+                lsn: this.lastKnownServerLSN,
+                activityDetected,
             });
 
         } catch (err) {
             this._state = 'error';
+            this.currentInterval = Math.min(this.currentInterval * 2, this.maxSyncIntervalMs); // Exponential backoff on error
             this.emit('sync:error', {
                 message: `Sync cycle failed: ${err.message}`,
                 originalError: err,
@@ -103,78 +154,91 @@ class SyncManager extends EventEmitter {
         try {
             const snapshot = await this.apiClient.get('/sync/snapshot');
 
-            if (!snapshot || !Array.isArray(snapshot.documents) || !snapshot.timestamp) {
-                this.emit('sync:initial_complete', { message: 'Snapshot not available or invalid, skipping.' });
-                logger.log('[SyncManager] Snapshot endpoint not available or returned invalid data. Skipping initial sync.');
+            if (!snapshot || !Array.isArray(snapshot.documents) || typeof snapshot.server_lsn !== 'number') {
+                this.emit('sync:initial_complete', { message: 'Snapshot not available or invalid. Continuing with delta sync.' });
                 return;
             }
-
+            
             await this.collection._internalClear();
             await this.collection._internalInsertMany(snapshot.documents);
 
-            this.lastSyncTimestamp = snapshot.timestamp;
+            this.lastKnownServerLSN = snapshot.server_lsn;
+            this.lastActivityTime = Date.now();
 
             this.emit('sync:initial_complete', {
                 documentsLoaded: snapshot.documents.length,
-                timestamp: snapshot.timestamp,
+                lsn: this.lastKnownServerLSN,
             });
-
         } catch (err) {
             throw new Error(`Initial sync failed: ${err.message}`);
         }
     }
 
-    async _performPush() {
-        const walEntries = await readWal(this.collection.walPath, this.lastSyncTimestamp, { recover: true });
-
-        if (walEntries.length === 0) {
-            return;
-        }
-
-        for (let i = 0; i < walEntries.length; i += this.pushBatchSize) {
-            const batch = walEntries.slice(i, i + this.pushBatchSize);
-            
-            try {
-                // Сервер должен принимать объект { ops: [...] }
-                await this.apiClient.post('/sync/push', { ops: batch });
-
-                const lastOpInBatch = batch[batch.length - 1];
-                const timestamp = lastOpInBatch.ts || lastOpInBatch.doc?.updatedAt || lastOpInBatch.data?.updatedAt;
-                if (timestamp) {
-                    this.lastSyncTimestamp = new Date(timestamp).toISOString();
-                }
-
-                this.emit('sync:push_success', {
-                    pushed: batch.length,
-                    total: walEntries.length,
-                    batch: i / this.pushBatchSize + 1,
-                    totalBatches: Math.ceil(walEntries.length / this.pushBatchSize),
-                });
-            } catch (err) {
-                throw new Error(`Push failed on batch: ${err.message}`);
-            }
-        }
-    }
-
     async _performPull() {
-        const pullUrl = this.lastSyncTimestamp ? `/sync/pull?since=${this.lastSyncTimestamp}` : '/sync/pull';
-        const serverOps = await this.apiClient.get(pullUrl);
+        const pullUrl = `/sync/pull?since_lsn=${this.lastKnownServerLSN}`;
+        const response = await this.apiClient.get(pullUrl);
 
-        if (!Array.isArray(serverOps) || serverOps.length === 0) {
-            return;
+        if (!response || !Array.isArray(response.ops) || response.ops.length === 0) {
+            return false; // No activity
         }
 
+        const serverOps = response.ops;
         for (const op of serverOps) {
             await this.collection._applyRemoteOperation(op);
         }
 
-        const lastServerOp = serverOps[serverOps.length - 1];
-        const timestamp = lastServerOp.ts || lastServerOp.doc?.updatedAt || lastServerOp.data?.updatedAt;
-        if (timestamp) {
-            this.lastSyncTimestamp = new Date(timestamp).toISOString();
+        if (typeof response.server_lsn === 'number') {
+            this.lastKnownServerLSN = response.server_lsn;
         }
 
-        this.emit('sync:pull_success', { pulled: serverOps.length });
+        this.emit('sync:pull_success', { pulled: serverOps.length, lsn: this.lastKnownServerLSN });
+        return true; // Activity detected
+    }
+
+    async _performPush() {
+        // We read all WAL entries since they represent local truth. The server will handle duplicates.
+        const walEntries = await readWal(this.collection.walPath, null, { recover: true });
+
+        if (walEntries.length === 0) {
+            return false; // No activity
+        }
+
+        for (let i = 0; i < walEntries.length; i += this.pushBatchSize) {
+            const batch = walEntries.slice(i, i + this.pushBatchSize);
+            const batchId = uuidv4(); // Unique ID for idempotent push
+
+            try {
+                const response = await this.apiClient.post('/sync/push', { batchId, ops: batch });
+                
+                if (typeof response.server_lsn === 'number') {
+                    this.lastKnownServerLSN = response.server_lsn;
+                }
+
+                this.emit('sync:push_success', {
+                    pushed: batch.length,
+                    batchId: batchId,
+                    lsn: this.lastKnownServerLSN,
+                });
+            } catch (err) {
+                // If a batch fails, we stop the push process for this cycle. It will be retried.
+                throw new Error(`Push failed on batch ${batchId}: ${err.message}`);
+            }
+        }
+        
+        // After a successful push, we can compact the local WAL, as the server has confirmed receipt.
+        await this.collection.compactWalAfterPush();
+        return true; // Activity detected
+    }
+    
+    async _performHeartbeat() {
+        try {
+            await this.apiClient.get('/sync/health');
+            this.lastActivityTime = Date.now(); // Reset timer even on heartbeat
+            this.emit('sync:heartbeat_success');
+        } catch (err) {
+            // A failed heartbeat is a sync error
+            throw new Error(`Heartbeat failed: ${err.message}`);
+        }
     }
 }
 

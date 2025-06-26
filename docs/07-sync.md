@@ -1,194 +1,215 @@
-```markdown
 docs/07-sync.md
-# 07. Надёжная синхронизация данных и обработка ошибок (WiseJSON Sync)
+Generated markdown
+# 07 - Продвинутая Синхронизация Данных (WiseJSON Sync)
 
-WiseJSON поддерживает двустороннюю синхронизацию локальных коллекций с удалённым сервером, полностью ориентированную на надёжность, прозрачность событий и диагностику ошибок. Этот раздел — практическое руководство для вашей интеграции.
+WiseJSON DB предлагает мощную и надежную систему двусторонней синхронизации данных между локальной базой и удаленным сервером. Эта система спроектирована с упором на отказоустойчивость, предсказуемость и прозрачность для разработчика.
 
----
+## Ключевые Принципы и Возможности
 
-## Зачем это нужно?
+*   **PULL -> PUSH Модель**: Для уменьшения количества конфликтов, клиент сначала запрашивает и применяет изменения с сервера (`PULL`), и только потом отправляет свои локальные изменения (`PUSH`).
+*   **Токенизация (LSN)**: Вместо ненадежных временных меток клиента, синхронизация использует серверный **LSN** (Log Sequence Number) — монотонно возрастающий номер последней операции. Это гарантирует, что клиент получит все изменения и ничего не пропустит, независимо от настроек времени.
+*   **Идемпотентность PUSH**: Каждая порция (батч) локальных изменений отправляется с уникальным ID (`batchId`). Сервер отслеживает полученные ID и игнорирует дубликаты, что защищает от повторного применения данных при сбоях сети.
+*   **Пакетная отправка (Batching)**: Большое количество локальных изменений автоматически разбивается на небольшие пакеты для отправки, что предотвращает ошибки, связанные с большими телами запросов.
+*   **Адаптивный интервал**: `SyncManager` автоматически регулирует частоту синхронизации. В периоды бездействия интервал увеличивается, а при активной работе — уменьшается, что снижает нагрузку на сеть.
+*   **Механизм "Карантина"**: Если с сервера приходит "битая" операция, которую невозможно применить (например, из-за нарушения уникального индекса), она не останавливает всю синхронизацию, а помещается в специальный лог-файл `quarantine_<collection>.log` для последующего анализа.
+*   **Heartbeat (Сердцебиение)**: Для проверки "живости" соединения в периоды бездействия `SyncManager` периодически отправляет легкие health-чеки на сервер.
+*   **Прозрачная обработка ошибок**: Все ошибки синхронизации (сетевые, серверные) не "роняют" приложение, а генерируют событие `sync:error`, на которое можно подписаться.
 
-- **Локальная работа + резервная синхронизация:** изменения не теряются даже при сбоях сети.
-- **Push/Pull модель:** локальные операции отправляются на сервер (PUSH), изменения с сервера применяются локально (PULL).
-- **Обработка ошибок по-серьёзному:** все сбои фиксируются не через исключения, а через события (`sync:error` и `sync:success`).
+## Как использовать
 
----
+### Шаг 1: Подключение и настройка
 
-## Как это работает?
+Включить синхронизацию для коллекции можно с помощью метода `collection.enableSync()`.
 
-- **SyncManager** управляет всеми sync-операциями: читает WAL (журнал изменений), отправляет новые записи на сервер, запрашивает изменения с сервера, обновляет коллекцию.
-- **Коллекция пробрасывает sync-события наружу:** любой код может реагировать на успешную sync (`sync:success`) или сбой (`sync:error`), не ловя ошибки в promise-цепочках.
-- **timestamp-based delta:** только реально новые операции отправляются на сервер.
-
----
-
-## Базовый пример синхронизации
-
-```js
-const WiseJSON = require('wise-json');
+```javascript
+const WiseJSON = require('wise-json-db');
+const { apiClient: ApiClient } = require('wise-json-db'); // Импортируем готовый клиент
 const path = require('path');
 
-(async () => {
-  // 1. Создаём или открываем базу и коллекцию
-  const db = new WiseJSON(path.resolve(__dirname, 'my-sync-db'));
-  await db.init();
-  const collection = await db.collection('my_docs');
-  await collection.initPromise;
+// 1. Инициализируем БД и коллекцию
+const db = new WiseJSON(path.resolve(__dirname, 'my-sync-db'));
+await db.init();
+const articles = await db.collection('articles');
+await articles.initPromise;
 
-  // 2. Навешиваем обработчики событий синхронизации
-  collection.on('sync:success', (info) => {
-    console.log('[SYNC SUCCESS]', info);
-  });
-  collection.on('sync:error', (err) => {
-    console.error('[SYNC ERROR]', err.message || err);
-  });
+// 2. Создаем экземпляр API-клиента
+const apiClientInstance = new ApiClient(
+    'https://api.example.com', // Базовый URL вашего сервера
+    'YOUR-SECRET-API-KEY'      // Ваш ключ API
+);
 
-  // 3. Включаем синхронизацию
-  collection.enableSync({
-    url: 'https://my-sync-server.example.com',
-    apiKey: 'SECRET-API-KEY'
-    // (можно передать syncIntervalMs или свой apiClient, если нужно)
-  });
+// 3. Включаем синхронизацию, передавая клиент и другие опции
+articles.enableSync({
+    apiClient: apiClientInstance,
+    // Эти параметры обязательны для внутренней проверки, даже если передан apiClient
+    url: 'https://api.example.com', 
+    apiKey: 'YOUR-SECRET-API-KEY',
 
-  // 4. Работаем как обычно — любые insert/update/remove идут в sync
-  await collection.insert({ _id: 'doc1', text: 'Hello world!' });
+    // Необязательные параметры для тонкой настройки
+    minSyncIntervalMs: 10000,    // мин. интервал (10 сек)
+    maxSyncIntervalMs: 5 * 60000, // макс. интервал (5 мин)
+    pushBatchSize: 200,          // отправлять по 200 операций за раз
+});
 
-  // 5. Можно явно запускать синхронизацию вручную
-  await collection.triggerSync();
+Шаг 2: Обработка событий синхронизации
 
-  // ...или ждать авто-синхронизации, если включён syncIntervalMs
-})();
-````
+Это самый важный шаг для создания надежного приложения. Подпишитесь на события, чтобы понимать, что происходит с синхронизацией.
 
----
+Generated javascript
+// Подписываемся на события ДО начала активной работы
 
-## Как правильно ловить ошибки синхронизации
+// Успешное завершение полного цикла PULL -> PUSH
+articles.on('sync:success', (payload) => {
+  console.log(`[SYNC] Цикл завершен. Активность: ${payload.activityDetected}. LSN сервера: ${payload.lsn}`);
+});
 
-* **Важный паттерн:**
-  Ошибки sync не выбрасываются в await или then, а приходят через событие `sync:error` (это защищает вас от "тихих падений" и неожиданных unhandled promise rejection).
-* Пример:
+// Критическая ошибка в цикле синхронизации
+articles.on('sync:error', (errorPayload) => {
+  console.error(`[SYNC ERROR] ${errorPayload.message}`, errorPayload.originalError);
+  // Здесь можно показать уведомление пользователю или записать в систему мониторинга
+});
 
-  ```js
-  collection.on('sync:error', err => {
-    // Можно показать пользователю предупреждение, попробовать перезапустить sync, залогировать ошибку
-    console.error('[SYNC ERROR CAUGHT]', err);
-  });
-  ```
+// Операция с сервера помещена в карантин
+articles.on('sync:quarantine', (quarantinePayload) => {
+  console.warn('[SYNC QUARANTINE] Не удалось применить операцию:', quarantinePayload.operation);
+  console.warn('Причина:', quarantinePayload.error.message);
+});
 
----
+// Другие полезные события для отладки:
+articles.on('sync:initial_start', () => console.log('[SYNC] Начальная полная синхронизация...'));
+articles.on('sync:initial_complete', (p) => console.log(`[SYNC] Начальная синхронизация завершена. Загружено: ${p.documentsLoaded} док.`));
+articles.on('sync:push_success', (p) => console.log(`[SYNC] Успешно отправлен батч ${p.batchId} (${p.pushed} операций).`));
+articles.on('sync:pull_success', (p) => console.log(`[SYNC] Получено ${p.pulled} операций с сервера.`));
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+JavaScript
+IGNORE_WHEN_COPYING_END
+Шаг 3: Работа с данными и ручное управление
 
-## Как устроено под капотом
+После включения синхронизации просто работайте с коллекцией как обычно. Все изменения (insert, update, remove) будут автоматически поставлены в очередь на отправку.
 
-* **WAL (Write-Ahead Log)** хранит все локальные изменения — ничего не теряется даже при сбое питания.
-* **SyncManager** читает WAL, сравнивает timestamps (updatedAt/createdAt), отправляет только новые операции.
-* **Коллекция** автоматически применяет все изменения с сервера, а синхронные события `sync:success` и `sync:error` пробрасываются наружу.
-* **Ошибки серверной синхронизации** (сетевые сбои, 500-ответы, invalid data) не "роняют" ваш процесс, а поступают как событие, чтобы вы могли реагировать гибко.
+Generated javascript
+// Это изменение будет автоматически отправлено на сервер в следующем цикле sync
+await articles.insert({ title: 'Новая статья', content: '...' });
 
----
+// Вы можете принудительно запустить цикл синхронизации в любой момент
+await articles.triggerSync();
 
-## Советы по интеграции и диагностике
+// Получить текущий статус синхронизации
+const status = articles.getSyncStatus();
+console.log(status); // { state: 'idle', isSyncing: false, ... }
 
-* Ставьте обработчик на `sync:error` **до** включения sync.
-* Всегда обновляйте `apiKey`/`url` при изменении сервера (вызывайте `disableSync()` и затем новый `enableSync()`).
-* Для ручной повторной sync после ошибки используйте `collection.triggerSync()`.
-* Если хотите полный контроль, используйте свой `apiClient` (см. исходники тестов).
+// Отключить синхронизацию (например, при выходе пользователя)
+articles.disableSync();
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+JavaScript
+IGNORE_WHEN_COPYING_END
+Требования к серверному API
 
----
+Чтобы WiseJSON Sync работал корректно, ваш бэкенд должен реализовывать следующие эндпоинты:
 
-## Пример с кастомным API client и ручной обработкой событий
+GET /sync/snapshot
 
-```js
-const http = require('http');
+Назначение: Для начальной полной синхронизации.
 
-function customApiClient() {
-  return {
-    post: (url, body) => {
-      // Пример простой реализации POST-запроса
-      return new Promise((resolve, reject) => {
-        // ... реализация ...
-        resolve({ status: 'ok' }); // для примера
-      });
-    },
-    get: (url) => {
-      return Promise.resolve([]); // пример пустого pull
-    }
-  };
+Ответ:
+
+Generated json
+{
+  "server_lsn": 12345,
+  "documents": [
+    { "_id": "...", "title": "...", "createdAt": "...", "updatedAt": "..." },
+    ...
+  ]
 }
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Json
+IGNORE_WHEN_COPYING_END
+GET /sync/pull?since_lsn=<number>
 
-const WiseJSON = require('wise-json');
-const db = new WiseJSON('./db');
-(async () => {
-  await db.init();
-  const col = await db.collection('sync_demo');
-  await col.initPromise;
+Назначение: Получить дельту (новые операции) с сервера.
 
-  col.on('sync:success', payload => console.log('SYNC OK:', payload));
-  col.on('sync:error', err => console.error('SYNC FAIL:', err));
+Параметр: since_lsn — последний LSN, известный клиенту. Сервер должен вернуть все операции с LSN > since_lsn.
 
-  col.enableSync({
-    url: 'http://localhost:3000',
-    apiKey: 'testkey',
-    apiClient: customApiClient()
-  });
+Ответ:
 
-  // Тестовое изменение
-  await col.insert({ _id: 'd1', value: 123 });
+Generated json
+{
+  "server_lsn": 12350,
+  "ops": [
+    { "op": "INSERT", "doc": { ... } },
+    { "op": "UPDATE", "id": "...", "data": { ... } }
+  ]
+}
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Json
+IGNORE_WHEN_COPYING_END
+POST /sync/push
 
-  // Форсируем sync для проверки событий
-  await col.triggerSync();
-})();
-```
+Назначение: Принять батч операций от клиента.
 
----
+Тело запроса:
 
-## Рекомендации для продакшена
+Generated json
+{
+  "batchId": "уникальный-id-батча-uuid",
+  "ops": [ ... ]
+}
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Json
+IGNORE_WHEN_COPYING_END
 
-* Используйте syncIntervalMs для фоновой синхронизации (например, 5000 мс).
-* Держите обработчики sync-событий всегда навешанными — для любой диагностики.
-* При ошибке sync можно пробовать авто-повтор, алерт или fallback на offline-режим.
+Логика: Сервер ДОЛЖЕН проверять batchId на уникальность. Если батч с таким ID уже был обработан, сервер должен вернуть успешный ответ, но не применять операции повторно (идемпотентность).
 
----
+Ответ:
 
-## Вопросы и ответы
+Generated json
+{
+  "status": "ok",
+  "server_lsn": 12355
+}
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Json
+IGNORE_WHEN_COPYING_END
+GET /sync/health
 
-**Q:** Что если sync\:error вообще не ловится?
-**A:** Проверьте, что обработчик навешан через collection.on('sync\:error', ...) ДО включения sync, и что ваша коллекция реально пробрасывает события из SyncManager наружу (см. раздел выше).
+Назначение: Проверка доступности сервера.
 
-**Q:** Как проверить, что sync действительно PUSHит и PULLит только новые данные?
-**A:** Посмотрите на lastSyncTimestamp: только операции с большим updatedAt/createdAt отправляются на сервер.
+Ответ:
 
----
+Generated json
+{
+  "status": "ok"
+}
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+Json
+IGNORE_WHEN_COPYING_END
 
-**WiseJSON делает синхронизацию локальных и серверных коллекций максимально надёжной, диагностируемой и дружелюбной к любым сбоям!**
+С этой продвинутой системой синхронизации вы можете создавать надежные оффлайн-приложения или распределенные системы с центральным сервером, будучи уверенными в целостности и сохранности данных.
 
----
-
-````
-
----
-
-## Как добавить пример в examples
-
-Создай файл, например, `examples/db-sync-example.js`:
-
-```js
-const WiseJSON = require('wise-json');
-const path = require('path');
-
-(async () => {
-  const db = new WiseJSON(path.resolve(__dirname, 'sync-example-db'));
-  await db.init();
-  const col = await db.collection('example_sync');
-  await col.initPromise;
-
-  col.on('sync:success', info => console.log('SYNC OK', info));
-  col.on('sync:error', err => console.error('SYNC ERROR', err));
-
-  col.enableSync({
-    url: 'http://localhost:3000',
-    apiKey: 'test'
-  });
-
-  await col.insert({ _id: 'foo', v: 1 });
-  await col.triggerSync();
-})();
+Generated code
+IGNORE_WHEN_COPYING_START
+content_copy
+download
+Use code with caution.
+IGNORE_WHEN_COPYING_END

@@ -1,32 +1,44 @@
+// wise-json/sync/api-client.js
+
 const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 
 /**
- * ApiClient - это низкоуровневый клиент для взаимодействия с удаленным сервером WiseJSON.
- * Он отвечает за формирование, отправку HTTP-запросов и обработку ответов.
+ * ApiClient - a low-level client for interacting with a remote WiseJSON server.
+ * It is responsible for creating and sending HTTP requests and handling responses.
  */
 class ApiClient {
     /**
-     * @param {string} baseUrl - Полный URL сервера, например, 'https://api.example.com/wisejson'.
-     * @param {string} apiKey - Ключ API для аутентификации.
+     * @param {string} baseUrl - The full base URL of the server, e.g., 'https://api.example.com'.
+     * @param {string} apiKey - The API key for authentication.
+     * @param {object} [endpoints={}] - Optional custom endpoint paths.
      */
-    constructor(baseUrl, apiKey) {
+    constructor(baseUrl, apiKey, endpoints = {}) {
         if (!baseUrl || !apiKey) {
-            throw new Error('ApiClient требует baseUrl и apiKey для инициализации.');
+            throw new Error('ApiClient requires baseUrl and apiKey for initialization.');
         }
         this.baseUrl = new URL(baseUrl);
         this.apiKey = apiKey;
         this.agent = this.baseUrl.protocol === 'https:' ? https : http;
+
+        // УЛУЧШЕНИЕ: Делаем эндпоинты настраиваемыми
+        this.endpoints = {
+            snapshot: '/sync/snapshot',
+            pull: '/sync/pull',
+            push: '/sync/push',
+            health: '/sync/health',
+            ...endpoints,
+        };
     }
 
     /**
-     * Основной метод для выполнения запросов.
+     * The core method for making requests.
      * @private
-     * @param {string} method - HTTP-метод ('GET', 'POST', и т.д.).
-     * @param {string} path - Путь запроса (например, '/sync/pull').
-     * @param {object|null} body - Тело запроса для методов POST/PUT.
-     * @returns {Promise<any>} - Промис, который разрешается с распарсенным JSON-ответом.
+     * @param {string} method - The HTTP method ('GET', 'POST', etc.).
+     * @param {string} path - The request path (e.g., '/sync/pull').
+     * @param {object|null} body - The request body for POST/PUT methods.
+     * @returns {Promise<any>} A promise that resolves with the parsed JSON response.
      */
     _request(method, path, body = null) {
         return new Promise((resolve, reject) => {
@@ -36,13 +48,14 @@ class ApiClient {
 
             const options = {
                 hostname: this.baseUrl.hostname,
-                port: this.baseUrl.port,
+                port: this.baseUrl.port || (this.baseUrl.protocol === 'https:' ? 443 : 80),
                 path: requestPath,
                 method: method.toUpperCase(),
                 headers: {
                     'Accept': 'application/json',
-                    'Authorization': `Bearer ${this.apiKey}`
-                }
+                    'Authorization': `Bearer ${this.apiKey}`,
+                },
+                timeout: 15000, // 15-секундный таймаут для запросов
             };
 
             if (body) {
@@ -60,9 +73,9 @@ class ApiClient {
                         let error;
                         try {
                             const errorPayload = JSON.parse(responseData);
-                            error = new Error(errorPayload.error || `Сервер вернул ошибку ${res.statusCode}`);
+                            error = new Error(errorPayload.error || `Server returned error ${res.statusCode}`);
                         } catch (e) {
-                            error = new Error(`Сервер вернул ошибку ${res.statusCode} с не-JSON телом: ${responseData}`);
+                            error = new Error(`Server returned error ${res.statusCode} with non-JSON body: ${responseData}`);
                         }
                         error.statusCode = res.statusCode;
                         return reject(error);
@@ -76,20 +89,25 @@ class ApiClient {
                         const parsedData = JSON.parse(responseData);
                         resolve(parsedData);
                     } catch (e) {
-                        reject(new Error('Не удалось распарсить JSON-ответ от сервера.'));
+                        reject(new Error(`Failed to parse JSON response from server. Raw response: ${responseData}`));
                     }
                 });
             });
+            
+            req.on('timeout', () => {
+                req.destroy();
+                reject(new Error('Request timed out after 15 seconds.'));
+            });
 
             req.on('error', (e) => {
-                reject(new Error(`Сетевая ошибка при запросе: ${e.message}`));
+                reject(new Error(`Network error during request: ${e.message}`));
             });
 
             if (body) {
                 try {
                     req.write(JSON.stringify(body));
-                } catch(e) {
-                    return reject(new Error(`Ошибка сериализации тела запроса: ${e.message}`));
+                } catch (e) {
+                    return reject(new Error(`Failed to serialize request body: ${e.message}`));
                 }
             }
 
@@ -98,8 +116,8 @@ class ApiClient {
     }
 
     /**
-     * Выполняет GET-запрос.
-     * @param {string} path - Путь запроса.
+     * Performs a GET request.
+     * @param {string} path - The request path.
      * @returns {Promise<any>}
      */
     get(path) {
@@ -107,9 +125,9 @@ class ApiClient {
     }
 
     /**
-     * Выполняет POST-запрос.
-     * @param {string} path - Путь запроса.
-     * @param {object} body - Тело запроса.
+     * Performs a POST request.
+     * @param {string} path - The request path.
+     * @param {object} body - The request body.
      * @returns {Promise<any>}
      */
     post(path, body) {
