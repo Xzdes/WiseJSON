@@ -1,6 +1,6 @@
 {
   "name": "wise-json-db",
-  "version": "5.6.3",
+  "version": "5.6.5",
   "description": "Blazing fast, crash-proof embedded JSON database for Node.js with batch operations, TTL, indexes, and segmented checkpointing.",
   "main": "index.js",
   "type": "commonjs",
@@ -60,7 +60,7 @@
     "node": ">=14.0.0"
   },
   "bin": {
-    "wise-json": "wise-json/cli/wise-json-cli.js",
+    "wise-json": "cli/index.js",
     "wisejson-explorer": "./explorer/cli.js"
   },
   "dependencies": {

@@ -84,7 +84,7 @@ async function importJson(filePath, options = {}) {
   let jsonData;
 
   try {
-    const rawData = await fs.readFile(filePath, 'utf8');
+    const rawData = await fs.readFile(filePath, 'utf8'); 
     jsonData = JSON.parse(rawData);
   } catch (error) {
     logger.error(`[Data Exchange] Error reading or parsing JSON file ${filePath}:`, error);
