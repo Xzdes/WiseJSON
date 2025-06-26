@@ -1,10 +1,11 @@
+// wise-json/collection/core.js
+
 const path = require('path');
 const fs = require('fs/promises');
 const { v4: uuidv4 } = require('uuid');
 const CollectionEventEmitter = require('./events.js');
 const IndexManager = require('./indexes.js');
 const logger = require('../logger');
-const createCheckpointController = require('./checkpoints.js');
 const SyncManager = require('../sync/sync-manager.js');
 const {
   defaultIdGenerator,
@@ -31,6 +32,7 @@ const {
   releaseCollectionLock
 } = require('./file-lock.js');
 const { createWriteQueue } = require('./queue.js');
+const { writeJsonFileSafe } = require('../storage-utils.js');
 
 const crudOps = require('./ops.js');
 const queryOps = require('./query-ops.js');
@@ -67,7 +69,7 @@ function validateCollectionOptions(opts = {}) {
 class Collection {
   constructor(name, dbRootPath, options = {}) {
     if (!isNonEmptyString(name)) {
-      throw new Error('Collection: имя коллекции должно быть непустой строкой.');
+      throw new Error('Collection: collection name must be a non-empty string.');
     }
 
     this.name = name;
@@ -76,7 +78,6 @@ class Collection {
 
     this.collectionDirPath = path.resolve(this.dbRootPath, this.name);
     this.checkpointsDir = path.join(this.collectionDirPath, '_checkpoints');
-
     this.walPath = getWalPath(this.collectionDirPath, this.name);
 
     this.documents = new Map();
@@ -86,23 +87,15 @@ class Collection {
     this._emitter = new CollectionEventEmitter(this.name);
     this._indexManager = new IndexManager(this.name);
 
-    this._checkpoint = createCheckpointController({
-      collectionName: this.name,
-      collectionDirPath: this.collectionDirPath,
-      documents: this.documents,
-      options: this.options,
-      getIndexesMeta: () => this._indexManager.getIndexesMeta(),
-    });
-
     this._stats = {
         inserts: 0,
         updates: 0,
         removes: 0,
         clears: 0,
-        walEntriesSinceCheckpoint: 0
+        walEntriesSinceCheckpoint: 0,
+        lastCheckpointTimestamp: null
     };
 
-    this._lastCheckpointTimestamp = null;
     this._checkpointTimerId = null;
     this._ttlCleanupTimer = null;
     this._releaseLock = null;
@@ -110,9 +103,14 @@ class Collection {
 
     createWriteQueue(this);
 
-    // --- Привязка методов к экземпляру ---
+    // --- Binding API methods to the instance ---
+    this._bindApiMethods();
 
-    // CRUD операции
+    this.initPromise = this._initialize();
+  }
+
+  _bindApiMethods() {
+    // CRUD operations
     this.insert = crudOps.insert.bind(this);
     this.insertMany = crudOps.insertMany.bind(this);
     this.update = crudOps.update.bind(this);
@@ -120,100 +118,132 @@ class Collection {
     this.removeMany = crudOps.removeMany.bind(this);
     this.clear = crudOps.clear.bind(this);
 
-    // Базовые методы запросов
+    // Basic query methods
     this.getById = queryOps.getById.bind(this);
     this.getAll = queryOps.getAll.bind(this);
     this.count = queryOps.count.bind(this);
     this.find = queryOps.find.bind(this);
     this.findOne = queryOps.findOne.bind(this);
 
-    // Старые методы запросов по индексам (для обратной совместимости)
-    this.findByIndexedValue = queryOps.findByIndexedValue.bind(this);
-    this.findOneByIndexedValue = queryOps.findOneByIndexedValue.bind(this);
-
-    // НОВЫЕ РАСШИРЕННЫЕ МЕТОДЫ
+    // MongoDB-style query methods
     this.updateOne = queryOps.updateOne.bind(this);
     this.updateMany = queryOps.updateMany.bind(this);
     this.findOneAndUpdate = queryOps.findOneAndUpdate.bind(this);
     this.deleteOne = queryOps.deleteOne.bind(this);
     this.deleteMany = queryOps.deleteMany.bind(this);
 
-    // Импорт/Экспорт
+    // Legacy index methods (for backward compatibility)
+    this.findByIndexedValue = queryOps.findByIndexedValue.bind(this);
+    this.findOneByIndexedValue = queryOps.findOneByIndexedValue.bind(this);
+
+    // Import/Export
     this.exportJson = dataExchangeOps.exportJson.bind(this);
     this.exportCsv = dataExchangeOps.exportCsv.bind(this);
     this.importJson = dataExchangeOps.importJson.bind(this);
+  }
 
-    this.initPromise = this._initialize();
+  async _initialize() {
+    await fs.mkdir(this.collectionDirPath, { recursive: true });
+    await fs.mkdir(this.checkpointsDir, { recursive: true });
+    await initializeWal(this.walPath, this.collectionDirPath);
+
+    const loadedCheckpoint = await loadLatestCheckpoint(this.checkpointsDir, this.name);
+    this.documents = loadedCheckpoint.documents;
+    this._stats.lastCheckpointTimestamp = loadedCheckpoint.timestamp || null;
+
+    for (const indexMeta of loadedCheckpoint.indexesMeta || []) {
+        try {
+            this._indexManager.createIndex(indexMeta.fieldName, { unique: indexMeta.type === 'unique' });
+        } catch (e) { /* ignore if already exists */ }
+    }
+    this._indexManager.rebuildIndexesFromData(this.documents);
+
+    const walReadOptsWithLoadFlag = { ...this.options.walReadOptions, isInitialLoad: true };
+    const walEntries = await readWal(this.walPath, this._stats.lastCheckpointTimestamp, walReadOptsWithLoadFlag);
+
+    for (const entry of walEntries) {
+      if (entry.txn === 'op' && entry._txn_applied_from_wal) {
+        await this._applyTransactionWalOp(entry);
+      } else if (!entry.txn) {
+        this._applyWalEntryToMemory(entry, false);
+      }
+    }
+
+    this._stats.walEntriesSinceCheckpoint = walEntries.length;
+    this._indexManager.rebuildIndexesFromData(this.documents);
+
+    this._startCheckpointTimer();
+    this._startTtlCleanupTimer();
+
+    this._emitter.emit('initialized');
+    return true;
   }
 
   _applyWalEntryToMemory(entry, emitEvents = true) {
-    if (entry.op === 'INSERT') {
-        const doc = entry.doc;
-        if (doc) {
-            this.documents.set(doc._id, doc);
-            this._indexManager.afterInsert(doc);
-            if (emitEvents) this._emitter.emit('insert', doc);
-        }
-    } else if (entry.op === 'BATCH_INSERT') {
-        const docs = Array.isArray(entry.docs) ? entry.docs : [];
-        for (const doc of docs) {
+    switch(entry.op) {
+        case 'INSERT': {
+            const doc = entry.doc;
             if (doc) {
                 this.documents.set(doc._id, doc);
                 this._indexManager.afterInsert(doc);
                 if (emitEvents) this._emitter.emit('insert', doc);
             }
+            break;
         }
-    } else if (entry.op === 'UPDATE') {
-        const id = entry.id;
-        const prevDoc = this.documents.get(id);
-        const dataToUpdate = entry.data || entry.doc; // 'doc' для обратной совместимости при слиянии
-        if (prevDoc && isAlive(prevDoc)) {
-            const updatedDoc = { ...prevDoc, ...dataToUpdate };
-            this.documents.set(id, updatedDoc);
-            this._indexManager.afterUpdate(prevDoc, updatedDoc);
-            if (emitEvents) this._emitter.emit('update', updatedDoc, prevDoc);
-        } else if (!prevDoc && entry.op === 'UPDATE') {
-            // Если документ не существует, а операция UPDATE, это может быть
-            // результатом слияния (кто-то создал, а кто-то обновил). Применяем как INSERT.
-            const newDoc = { _id: id, ...dataToUpdate };
-            this.documents.set(id, newDoc);
-            this._indexManager.afterInsert(newDoc);
-            if(emitEvents) this._emitter.emit('insert', newDoc);
+        case 'BATCH_INSERT': {
+            const docs = Array.isArray(entry.docs) ? entry.docs : [];
+            for (const doc of docs) {
+                if (doc) {
+                    this.documents.set(doc._id, doc);
+                    this._indexManager.afterInsert(doc);
+                    if (emitEvents) this._emitter.emit('insert', doc);
+                }
+            }
+            break;
         }
-    } else if (entry.op === 'REMOVE') {
-        const id = entry.id;
-        const prevDoc = this.documents.get(id);
-        if (prevDoc) {
-            this.documents.delete(id);
-            this._indexManager.afterRemove(prevDoc);
-            if (emitEvents) this._emitter.emit('remove', prevDoc);
+        case 'UPDATE': {
+            const id = entry.id;
+            const prevDoc = this.documents.get(id);
+            const dataToUpdate = entry.data;
+            if (prevDoc && isAlive(prevDoc)) {
+                const updatedDoc = { ...prevDoc, ...dataToUpdate };
+                this.documents.set(id, updatedDoc);
+                this._indexManager.afterUpdate(prevDoc, updatedDoc);
+                if (emitEvents) this._emitter.emit('update', updatedDoc, prevDoc);
+            }
+            break;
         }
-    } else if (entry.op === 'CLEAR') {
-        const allDocs = Array.from(this.documents.values());
-        this.documents.clear();
-        for (const doc of allDocs) {
-            this._indexManager.afterRemove(doc);
+        case 'REMOVE': {
+            const id = entry.id;
+            const prevDoc = this.documents.get(id);
+            if (prevDoc) {
+                this.documents.delete(id);
+                this._indexManager.afterRemove(prevDoc);
+                if (emitEvents) this._emitter.emit('remove', prevDoc);
+            }
+            break;
         }
-        this._indexManager.clearAllData();
-        if (emitEvents) this._emitter.emit('clear');
+        case 'CLEAR': {
+            const allDocs = Array.from(this.documents.values());
+            this.documents.clear();
+            this._indexManager.clearAllData();
+            if (emitEvents) this._emitter.emit('clear', { clearedCount: allDocs.length });
+            break;
+        }
     }
   }
 
-  async _enqueueDataModification(entry, opType, getResultFn, extra = {}) {
+  async _enqueueDataModification(entry, opType, getResultFn) {
+    // Upfront uniqueness checks
     if (this._indexManager) {
         if (opType === 'INSERT') {
             const docToInsert = entry.doc;
             if (docToInsert) {
-                const uniqueIndexesMeta = (this._indexManager.getIndexesMeta() || []).filter(m => m.type === 'unique');
-                for (const idxMeta of uniqueIndexesMeta) {
-                    const fieldName = idxMeta.fieldName;
-                    const valueToInsert = docToInsert[fieldName];
-                    if (valueToInsert !== undefined && valueToInsert !== null) {
-                        const index = this._indexManager.indexes.get(fieldName);
-                        if (index && index.data && index.data.has(valueToInsert)) {
-                            if (index.data.get(valueToInsert) !== docToInsert._id) {
-                                throw new Error(`Duplicate value '${valueToInsert}' for unique index '${fieldName}' in insert operation`);
-                            }
+                for (const idxMeta of this._indexManager.getIndexesMeta()) {
+                    if (idxMeta.type === 'unique') {
+                        const value = docToInsert[idxMeta.fieldName];
+                        if (value !== undefined && this._indexManager.findOneIdByIndex(idxMeta.fieldName, value)) {
+                            throw new Error(`Duplicate value '${value}' for unique index '${idxMeta.fieldName}'`);
                         }
                     }
                 }
@@ -221,39 +251,31 @@ class Collection {
         } else if (opType === 'BATCH_INSERT') {
             const docs = entry.docs || [];
             if (docs.length > 0) {
-                const uniqueIndexesMeta = (this._indexManager.getIndexesMeta() || []).filter(meta => meta.type === 'unique').map(meta => meta.fieldName);
-                for (const field of uniqueIndexesMeta) {
-                    const batchValues = new Set();
-                    const existingValuesFromMemory = new Set();
-                    for (const doc of this.documents.values()) {
-                        if (doc[field] !== undefined && doc[field] !== null) existingValuesFromMemory.add(doc[field]);
-                    }
-                    for (const doc of docs) {
-                        if (doc[field] !== undefined && doc[field] !== null) {
-                            if (batchValues.has(doc[field]) || existingValuesFromMemory.has(doc[field])) {
-                                throw new Error(`Duplicate value '${doc[field]}' for unique index '${field}' in batch insert`);
+                for (const idxMeta of this._indexManager.getIndexesMeta()) {
+                    if (idxMeta.type === 'unique') {
+                        const seenValues = new Set();
+                        for (const doc of docs) {
+                            const value = doc[idxMeta.fieldName];
+                            if (value !== undefined) {
+                                if (seenValues.has(value) || this._indexManager.findOneIdByIndex(idxMeta.fieldName, value)) {
+                                    throw new Error(`Duplicate value '${value}' for unique index '${idxMeta.fieldName}' in batch insert`);
+                                }
+                                seenValues.add(value);
                             }
-                            batchValues.add(doc[field]);
                         }
                     }
                 }
             }
         } else if (opType === 'UPDATE') {
-            const docId = entry.id;
-            const updates = entry.data;
-            const originalDoc = this.documents.get(docId);
-            if (originalDoc && updates) {
-                const uniqueIndexesMeta = (this._indexManager.getIndexesMeta() || []).filter(m => m.type === 'unique');
-                for (const idxMeta of uniqueIndexesMeta) {
-                    const fieldName = idxMeta.fieldName;
-                    if (updates.hasOwnProperty(fieldName)) {
-                        const newValue = updates[fieldName];
-                        const oldValue = originalDoc[fieldName];
-                        if (newValue !== oldValue && newValue !== undefined && newValue !== null) {
-                            const index = this._indexManager.indexes.get(fieldName);
-                            if (index && index.data && index.data.has(newValue) && index.data.get(newValue) !== docId) {
-                                throw new Error(`Duplicate value '${newValue}' for unique index '${fieldName}' in update operation for document '${docId}'`);
-                            }
+            const { id, data } = entry;
+            const originalDoc = this.documents.get(id);
+            if (originalDoc && data) {
+                for (const idxMeta of this._indexManager.getIndexesMeta()) {
+                    if (idxMeta.type === 'unique' && data.hasOwnProperty(idxMeta.fieldName)) {
+                        const newValue = data[idxMeta.fieldName];
+                        const existingId = this._indexManager.findOneIdByIndex(idxMeta.fieldName, newValue);
+                        if (existingId && existingId !== id) {
+                            throw new Error(`Duplicate value '${newValue}' for unique index '${idxMeta.fieldName}' in update`);
                         }
                     }
                 }
@@ -267,50 +289,12 @@ class Collection {
     this._applyWalEntryToMemory(entry, true);
     this._handlePotentialCheckpointTrigger();
 
-    let nextResult = undefined;
+    let nextResult;
     if (opType === 'INSERT') nextResult = entry.doc;
     else if (opType === 'BATCH_INSERT') nextResult = entry.docs;
     else if (opType === 'UPDATE') nextResult = this.documents.get(entry.id);
 
     return getResultFn ? getResultFn(undefined, nextResult) : undefined;
-  }
-
-  async _initialize() {
-    await fs.mkdir(this.collectionDirPath, { recursive: true });
-    await fs.mkdir(this.checkpointsDir, { recursive: true });
-
-    await initializeWal(this.walPath, this.collectionDirPath);
-
-    const loadedCheckpoint = await loadLatestCheckpoint(this.checkpointsDir, this.name);
-
-    for (const [id, doc] of loadedCheckpoint.documents.entries()) {
-        this.documents.set(id, doc);
-    }
-    for (const indexMeta of loadedCheckpoint.indexesMeta || []) {
-        try {
-            this._indexManager.createIndex(indexMeta.fieldName, { unique: indexMeta.type === 'unique' });
-        } catch (e) { /* ignore */ }
-    }
-
-    const walReadOptsWithLoadFlag = {...this.options.walReadOptions, isInitialLoad: true };
-    const walEntries = await readWal(this.walPath, loadedCheckpoint.timestamp, walReadOptsWithLoadFlag);
-
-    for (const entry of walEntries) {
-      if (entry.txn === 'op' && entry._txn_applied_from_wal) {
-        await this._applyTransactionWalOp(entry);
-      } else if (!entry.txn) {
-        this._applyWalEntryToMemory(entry, false);
-      }
-    }
-
-    this._stats.walEntriesSinceCheckpoint = 0;
-    this._indexManager.rebuildIndexesFromData(this.documents);
-
-    this._startCheckpointTimer();
-    this._startTtlCleanupTimer();
-    this._lastCheckpointTimestamp = loadedCheckpoint.timestamp || null;
-    this._emitter.emit('initialized');
-    return true;
   }
 
   async _acquireLock() {
@@ -326,22 +310,18 @@ class Collection {
   }
 
   _startCheckpointTimer() {
-    this.stopCheckpointTimer(); // Сначала останавливаем предыдущий, если был
+    this.stopCheckpointTimer();
     if (this.options.checkpointIntervalMs > 0) {
         this._checkpointTimerId = setInterval(async () => {
             try {
-                // logger.debug(`[Collection] Auto-checkpoint for ${this.name} triggered by timer.`); // Опциональный debug-лог
                 await this.flushToDisk();
             } catch (e) {
-                logger.error(`[Collection] Ошибка авто-чекпоинта для ${this.name}: ${e.message}`, e.stack);
+                logger.error(`[Collection] Auto-checkpoint error for ${this.name}: ${e.message}`, e.stack);
             }
         }, this.options.checkpointIntervalMs);
-
-        // --- ДОБАВЛЕНО ---
         if (this._checkpointTimerId && typeof this._checkpointTimerId.unref === 'function') {
             this._checkpointTimerId.unref();
         }
-        // --- КОНЕЦ ДОБАВЛЕНИЯ ---
     }
   }
 
@@ -353,24 +333,21 @@ class Collection {
   }
 
   _startTtlCleanupTimer() {
-    this._stopTtlCleanupTimer(); // Сначала останавливаем предыдущий, если был
+    this._stopTtlCleanupTimer();
     if (this.options.ttlCleanupIntervalMs > 0) {
         this._ttlCleanupTimer = setInterval(() => {
             try {
                 const removedCount = cleanupExpiredDocs(this.documents, this._indexManager);
-                if (removedCount > 0 && logger.getLevel() === 'debug') { // Опциональный debug-лог
-                    // logger.debug(`[Collection] [TTL] Auto-cleanup removed ${removedCount} docs from ${this.name}.`);
+                if (removedCount > 0) {
+                    logger.debug(`[Collection] [TTL] Auto-cleanup removed ${removedCount} docs from ${this.name}.`);
                 }
             } catch (e) {
-                logger.error(`[Collection] [TTL] Ошибка авто-очистки TTL для ${this.name}: ${e.message}`, e.stack);
+                logger.error(`[Collection] [TTL] Auto-cleanup error for ${this.name}: ${e.message}`, e.stack);
             }
         }, this.options.ttlCleanupIntervalMs);
-
-        // --- ДОБАВЛЕНО ---
         if (this._ttlCleanupTimer && typeof this._ttlCleanupTimer.unref === 'function') {
             this._ttlCleanupTimer.unref();
         }
-        // --- КОНЕЦ ДОБАВЛЕНИЯ ---
     }
   }
 
@@ -386,33 +363,65 @@ class Collection {
     if (this.options.maxWalEntriesBeforeCheckpoint > 0 &&
         this._stats.walEntriesSinceCheckpoint >= this.options.maxWalEntriesBeforeCheckpoint) {
         this.flushToDisk().catch(e => {
-            logger.error(`[Collection] Ошибка авто-чекпоинта (по кол-ву WAL) для ${this.name}: ${e.message}`, e.stack);
+            logger.error(`[Collection] Auto-checkpoint (by WAL count) error for ${this.name}: ${e.message}`, e.stack);
         });
     }
   }
 
   async flushToDisk() {
-    await this._acquireLock();
-    try {
+    return this._enqueue(async () => {
         cleanupExpiredDocs(this.documents, this._indexManager);
-        const checkpointResult = await this._checkpoint.saveCheckpoint();
+        
+        const timestamp = new Date().toISOString();
+        const meta = {
+            collectionName: this.name,
+            timestamp,
+            documentCount: this.documents.size,
+            indexesMeta: this._indexManager.getIndexesMeta() || []
+        };
+        
+        const timestampForFile = timestamp.replace(/[:.]/g, '-');
+        const metaPath = path.join(this.checkpointsDir, `checkpoint_meta_${this.name}_${timestampForFile}.json`);
+        await writeJsonFileSafe(metaPath, meta);
 
-        let newTimestamp = null;
-        if (checkpointResult && checkpointResult.meta && checkpointResult.meta.timestamp) {
-            newTimestamp = checkpointResult.meta.timestamp;
+        // Segmented data write
+        const aliveDocs = Array.from(this.documents.values());
+        const maxSegmentSize = this.options.maxSegmentSizeBytes;
+        let segmentIndex = 0;
+        for (let i = 0; i < aliveDocs.length; i += 1000) { // Chunking for memory efficiency
+            let currentSegment = [];
+            let currentSize = 2; // for "[]"
+            const chunk = aliveDocs.slice(i, Math.min(i + 1000, aliveDocs.length));
+
+            for(const doc of chunk) {
+                const docStr = JSON.stringify(doc);
+                const docSize = Buffer.byteLength(docStr, 'utf8') + (currentSegment.length > 0 ? 1 : 0);
+                if (currentSize + docSize > maxSegmentSize && currentSegment.length > 0) {
+                    const dataPath = path.join(this.checkpointsDir, `checkpoint_data_${this.name}_${timestampForFile}_seg${segmentIndex++}.json`);
+                    await writeJsonFileSafe(dataPath, currentSegment);
+                    currentSegment = [];
+                    currentSize = 2;
+                }
+                currentSegment.push(doc);
+                currentSize += docSize;
+            }
+            if (currentSegment.length > 0) {
+                const dataPath = path.join(this.checkpointsDir, `checkpoint_data_${this.name}_${timestampForFile}_seg${segmentIndex++}.json`);
+                await writeJsonFileSafe(dataPath, currentSegment);
+            }
         }
-        this._lastCheckpointTimestamp = newTimestamp || new Date().toISOString();
+        
+        this._stats.lastCheckpointTimestamp = timestamp;
         this._stats.walEntriesSinceCheckpoint = 0;
 
-        await compactWal(this.walPath, this._lastCheckpointTimestamp);
+        await compactWal(this.walPath, this._stats.lastCheckpointTimestamp);
 
         if (this.options.checkpointsToKeep > 0) {
             await cleanupOldCheckpoints(this.checkpointsDir, this.name, this.options.checkpointsToKeep);
         }
-        return checkpointResult;
-    } finally {
-        await this._releaseLockIfHeld();
-    }
+        
+        this._emitter.emit('checkpoint', { timestamp });
+    });
   }
 
   async close() {
@@ -421,32 +430,31 @@ class Collection {
     this._stopTtlCleanupTimer();
     await this.flushToDisk();
     await this._releaseLockIfHeld();
+    this._emitter.emit('closed');
   }
 
   stats() {
     cleanupExpiredDocs(this.documents, this._indexManager);
     return {
-      inserts: this._stats.inserts,
-      updates: this._stats.updates,
-      removes: this._stats.removes,
-      clears: this._stats.clears,
+      ...this._stats,
       count: this.documents.size,
-      walEntriesSinceCheckpoint: this._stats.walEntriesSinceCheckpoint,
     };
   }
-
+  
+  // ИСПРАВЛЕНИЕ: Убрали вызов flushToDisk из createIndex
   async createIndex(fieldName, options = {}) {
     return this._enqueue(async () => {
         this._indexManager.createIndex(fieldName, options);
         this._indexManager.rebuildIndexesFromData(this.documents);
-        await this.flushToDisk();
+        // await this.flushToDisk(); // ЭТА СТРОКА УДАЛЕНА
     });
   }
 
+  // ИСПРАВЛЕНИЕ: Убрали вызов flushToDisk из dropIndex
   async dropIndex(fieldName) {
     return this._enqueue(async () => {
         this._indexManager.dropIndex(fieldName);
-        await this.flushToDisk();
+        // await this.flushToDisk(); // ЭТА СТРОКА УДАЛЕНА
     });
   }
 
@@ -462,37 +470,42 @@ class Collection {
     this._emitter.off(eventName, listener);
   }
 
-  // --- МЕТОДЫ СИНХРОНИЗАЦИИ ---
+  // --- SYNC METHODS ---
 
-enableSync(syncOptions) {
+  enableSync(syncOptions) {
     if (this.syncManager) {
-        logger.warn(`[Sync] Синхронизация для коллекции '${this.name}' уже включена.`);
+        logger.warn(`[Sync] Sync for collection '${this.name}' is already enabled.`);
         return;
     }
-    if (!syncOptions || !syncOptions.url || !syncOptions.apiKey) {
-        throw new Error('Для включения синхронизации необходимы `url` и `apiKey`.');
+    const { url, apiKey, ...restOptions } = syncOptions;
+    if (!url || !apiKey) {
+        throw new Error('Sync requires `url` and `apiKey`.');
     }
     this.syncManager = new SyncManager({ collection: this, ...syncOptions });
 
-    // --- ВАЖНО! Прокидываем события sync наружу! ---
-    this.syncManager.on('sync:error', (...args) => this._emitter.emit('sync:error', ...args));
+    this.syncManager.on('sync:start', (...args) => this._emitter.emit('sync:start', ...args));
     this.syncManager.on('sync:success', (...args) => this._emitter.emit('sync:success', ...args));
-    // ----
+    this.syncManager.on('sync:error', (...args) => this._emitter.emit('sync:error', ...args));
+    this.syncManager.on('sync:push_success', (...args) => this._emitter.emit('sync:push_success', ...args));
+    this.syncManager.on('sync:pull_success', (...args) => this._emitter.emit('sync:pull_success', ...args));
+    this.syncManager.on('sync:initial_start', (...args) => this._emitter.emit('sync:initial_start', ...args));
+    this.syncManager.on('sync:initial_complete', (...args) => this._emitter.emit('sync:initial_complete', ...args));
+    this.syncManager.on('sync:conflict_resolved', (...args) => this._emitter.emit('sync:conflict_resolved', ...args));
 
     this.syncManager.start();
-}
+  }
 
   disableSync() {
     if (this.syncManager) {
         this.syncManager.stop();
         this.syncManager = null;
-        logger.log(`[Sync] Синхронизация для коллекции '${this.name}' остановлена.`);
+        logger.log(`[Sync] Sync for collection '${this.name}' stopped.`);
     }
   }
 
   async triggerSync() {
     if (!this.syncManager) {
-        logger.warn(`[Sync] Невозможно запустить синхронизацию для '${this.name}', так как она не включена.`);
+        logger.warn(`[Sync] Cannot trigger sync for '${this.name}', sync is not enabled.`);
         return Promise.resolve();
     }
     return this.syncManager.runSync();
@@ -500,27 +513,86 @@ enableSync(syncOptions) {
 
   getSyncStatus() {
     if (!this.syncManager) {
-        return { state: 'disabled', isSyncing: false, lastSyncTimestamp: null };
+        return { state: 'disabled', isSyncing: false, lastSyncTimestamp: null, initialSyncComplete: false };
     }
     return this.syncManager.getStatus();
   }
-  
+
+  /**
+   * @internal
+   * Внутренний метод для полной очистки коллекции без записи в WAL.
+   * Используется для начальной синхронизации.
+   */
+  async _internalClear() {
+    return this._enqueue(async () => {
+        const clearedCount = this.documents.size;
+        this.documents.clear();
+        this._indexManager.clearAllData();
+        this._emitter.emit('clear', { clearedCount });
+    });
+  }
+
+  /**
+   * @internal
+   * Внутренний метод для массовой вставки документов без записи в WAL.
+   * Используется для начальной синхронизации.
+   * @param {Array<object>} docs - Массив документов для вставки.
+   */
+  async _internalInsertMany(docs) {
+    return this._enqueue(async () => {
+        for (const doc of docs) {
+            if (!doc._id) doc._id = this._idGenerator();
+            if (!doc.createdAt) doc.createdAt = new Date().toISOString();
+            if (!doc.updatedAt) doc.updatedAt = doc.createdAt;
+            this.documents.set(doc._id, doc);
+        }
+        this._indexManager.rebuildIndexesFromData(this.documents);
+        this._emitter.emit('import', { count: docs.length });
+    });
+  }
+
+  /**
+   * Применяет операцию, полученную с удаленного сервера.
+   * Включает логику разрешения конфликтов "Last Write Wins".
+   * @param {object} remoteOp - Операция, полученная с сервера.
+   * @internal
+   */
   async _applyRemoteOperation(remoteOp) {
     if (!remoteOp || !remoteOp.op) {
-        logger.warn(`[Sync] Получена некорректная удаленная операция:`, remoteOp);
+        logger.warn(`[Sync] Received invalid remote operation:`, remoteOp);
         return;
     }
     
-    // Помечаем операцию как пришедшую извне, чтобы не отправлять ее обратно
+    const docId = remoteOp.id || remoteOp.doc?._id;
+    const localDoc = docId ? this.documents.get(docId) : null;
+    const remoteTimestampStr = remoteOp.ts || remoteOp.doc?.updatedAt || remoteOp.data?.updatedAt;
+
+    if (localDoc && remoteTimestampStr) {
+        try {
+            const remoteTimestamp = new Date(remoteTimestampStr).getTime();
+            const localTimestamp = new Date(localDoc.updatedAt).getTime();
+            
+            if (localTimestamp > remoteTimestamp) {
+                this._emitter.emit('sync:conflict_resolved', {
+                    type: 'ignored_remote',
+                    reason: 'local_is_newer',
+                    docId: docId,
+                    localTimestamp: localDoc.updatedAt,
+                    remoteTimestamp: remoteTimestampStr
+                });
+                return;
+            }
+        } catch (e) {
+            logger.warn(`[Sync] Could not parse timestamp for conflict resolution. Applying remote op. Error: ${e.message}`);
+        }
+    }
+
     const entry = { ...remoteOp, _remote: true };
-
-    // Записываем операцию в локальный WAL.
-    // Это гарантирует персистентность удаленных изменений.
     await require('../wal-manager.js').appendWalEntry(this.walPath, entry);
-
-    // Применяем операцию к данным в памяти.
     this._applyWalEntryToMemory(entry, true);
   }
+
+  // --- TRANSACTION METHODS ---
 
   async _applyTransactionWalOp(entry) {
     const txidForLog = entry.txid || entry.id || 'unknown_txid';
@@ -530,7 +602,7 @@ enableSync(syncOptions) {
       case 'update': await this._applyTransactionUpdate(entry.args[0], entry.args[1], txidForLog); break;
       case 'remove': await this._applyTransactionRemove(entry.args[0], txidForLog); break;
       case 'clear': await this._applyTransactionClear(txidForLog); break;
-      default: logger.warn(`[Collection] Неизвестный тип транзакционной WAL-операции '${entry.type}' для ${this.name}, txid: ${txidForLog}`);
+      default: logger.warn(`[Collection] Unknown transactional WAL op type '${entry.type}' for ${this.name}, txid: ${txidForLog}`);
     }
   }
   async _applyTransactionInsert(docData, txid) {
@@ -560,7 +632,7 @@ enableSync(syncOptions) {
   async _applyTransactionUpdate(id, updates, txid) {
     const oldDoc = this.documents.get(id);
     if (!oldDoc) return null;
-    const { _id, createdAt, _txn, ...restOfUpdates } = updates;
+    const { _id, createdAt, ...restOfUpdates } = updates;
     const now = new Date().toISOString();
     const newDoc = { ...oldDoc, ...restOfUpdates, updatedAt: updates.updatedAt || now, _txn: txid };
     this.documents.set(id, newDoc);
@@ -579,16 +651,13 @@ enableSync(syncOptions) {
     return true;
   }
   async _applyTransactionClear(txid) {
-    const allDocs = Array.from(this.documents.values());
+    const clearedCount = this.documents.size;
     this.documents.clear();
-    for (const doc of allDocs) {
-      this._indexManager.afterRemove(doc);
-    }
     this._indexManager.clearAllData();
     this._stats.clears++;
     this._stats.inserts = 0; this._stats.updates = 0; this._stats.removes = 0;
     this._stats.walEntriesSinceCheckpoint = 0;
-    this._emitter.emit('clear');
+    this._emitter.emit('clear', { clearedCount, _txn: txid });
     return true;
   }
 }
