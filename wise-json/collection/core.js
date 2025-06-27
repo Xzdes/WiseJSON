@@ -7,6 +7,7 @@ const CollectionEventEmitter = require('./events.js');
 const IndexManager = require('./indexes.js');
 const logger = require('../logger');
 const SyncManager = require('../sync/sync-manager.js');
+const { UniqueConstraintError } = require('../errors.js'); // <--- ВАЖНО!
 const {
   defaultIdGenerator,
   isNonEmptyString,
@@ -263,8 +264,9 @@ class Collection {
                 for (const idxMeta of this._indexManager.getIndexesMeta()) {
                     if (idxMeta.type === 'unique') {
                         const value = docToInsert[idxMeta.fieldName];
-                        if (value !== undefined && value !== null && this._indexManager.findOneIdByIndex(idxMeta.fieldName, value)) {
-                            throw new Error(`Duplicate value '${value}' for unique index '${idxMeta.fieldName}'`);
+                           if (value !== undefined && value !== null && this._indexManager.findOneIdByIndex(idxMeta.fieldName, value)) {
+            // ЗАМЕНА ЗДЕСЬ
+            throw new UniqueConstraintError(idxMeta.fieldName, value);
                         }
                     }
                 }
@@ -278,10 +280,11 @@ class Collection {
                         for (const doc of docs) {
                             const value = doc[idxMeta.fieldName];
                             if (value !== undefined && value !== null) {
-                                if (seenValues.has(value) || this._indexManager.findOneIdByIndex(idxMeta.fieldName, value)) {
-                                    throw new Error(`Duplicate value '${value}' for unique index '${idxMeta.fieldName}' in batch insert`);
-                                }
-                                seenValues.add(value);
+                if (seenValues.has(value) || this._indexManager.findOneIdByIndex(idxMeta.fieldName, value)) {
+                // ЗАМЕНА ЗДЕСЬ
+                throw new UniqueConstraintError(idxMeta.fieldName, value);
+              }
+              seenValues.add(value);
                             }
                         }
                     }
@@ -296,8 +299,9 @@ class Collection {
                         const newValue = data[idxMeta.fieldName];
                         if (newValue !== undefined && newValue !== null) {
                             const existingId = this._indexManager.findOneIdByIndex(idxMeta.fieldName, newValue);
-                            if (existingId && existingId !== id) {
-                                throw new Error(`Duplicate value '${newValue}' for unique index '${idxMeta.fieldName}' in update`);
+    if (existingId && existingId !== id) {
+              // ЗАМЕНА ЗДЕСЬ
+              throw new UniqueConstraintError(idxMeta.fieldName, newValue);
                             }
                         }
                     }

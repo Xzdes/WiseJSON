@@ -4,6 +4,8 @@ const path = require('path');
 const fs = require('fs');
 const assert = require('assert');
 const WiseJSON = require('../wise-json/index.js');
+// +++ ИМПОРТ ОШИБКИ +++
+const { UniqueConstraintError } = require('../wise-json/errors.js');
 
 const DB_PATH = path.resolve(__dirname, 'db-unique-index-all');
 const COL = 'uniq_test';
@@ -17,8 +19,7 @@ async function main() {
     cleanUp();
 
     const db = new WiseJSON(DB_PATH);
-    const col = await db.collection(COL);
-    await col.initPromise;
+    const col = await db.getCollection(COL);
 
     // 1. Создаём уникальный индекс
     await col.createIndex('email', { unique: true });
@@ -28,25 +29,27 @@ async function main() {
     assert.strictEqual(await col.count(), 1, 'Insert first');
 
     // 3. Пытаемся вставить второй с таким же email — должно быть исключение!
-    let dupError = false;
-    try {
-        await col.insert({ email: 'u1@mail.com', name: 'User2' });
-    } catch (e) {
-        dupError = true;
-    }
-    assert(dupError, 'Duplicate insert throws');
+    // ИСПРАВЛЕННЫЙ ТЕСТ:
+    await assert.rejects(
+        async () => {
+            await col.insert({ email: 'u1@mail.com', name: 'User2' });
+        },
+        UniqueConstraintError,
+        'Should throw UniqueConstraintError on duplicate insert'
+    );
 
     // 4. Batch insert с одним дубликатом — должна быть ошибка
-    let batchError = false;
-    try {
-        await col.insertMany([
-            { email: 'u2@mail.com', name: 'User2' },
-            { email: 'u1@mail.com', name: 'User3' }
-        ]);
-    } catch (e) {
-        batchError = true;
-    }
-    assert(batchError, 'Batch insert with duplicate throws');
+    // ИСПРАВЛЕННЫЙ ТЕСТ:
+    await assert.rejects(
+        async () => {
+            await col.insertMany([
+                { email: 'u2@mail.com', name: 'User2' },
+                { email: 'u1@mail.com', name: 'User3' } // дубликат
+            ]);
+        },
+        UniqueConstraintError,
+        'Should throw UniqueConstraintError on batch insert with duplicate'
+    );
 
     // 5. Batch insert без дубликатов — проходит
     await col.insertMany([
@@ -56,17 +59,20 @@ async function main() {
     assert.strictEqual(await col.count(), 3, 'Batch insert OK');
 
     // 6. Обновление: пытаемся обновить email на уже существующий — ошибка
-    let updateError = false;
-    try {
-        await col.updateMany(d => d.name === 'User3', { email: 'u2@mail.com' });
-    } catch (e) {
-        updateError = true;
-    }
-    assert(updateError, 'Update duplicate throws');
+    const user3 = await col.findOne({ email: 'u3@mail.com' });
+    // ИСПРАВЛЕННЫЙ ТЕСТ:
+    await assert.rejects(
+        async () => {
+            // Пытаемся установить email 'u2@mail.com', который уже занят
+            await col.update(user3._id, { email: 'u2@mail.com' });
+        },
+        UniqueConstraintError,
+        'Should throw UniqueConstraintError on update with duplicate value'
+    );
 
     // 7. Обновление без конфликта — проходит
-    await col.updateMany(d => d.name === 'User3', { email: 'u4@mail.com' });
-    const byEmail = await col.findByIndexedValue('email', 'u4@mail.com');
+    await col.update(user3._id, { email: 'u4@mail.com' });
+    const byEmail = await col.find({ email: 'u4@mail.com' });
     assert(byEmail.length === 1 && byEmail[0].name === 'User3', 'Update unique ok');
 
     await db.close();
