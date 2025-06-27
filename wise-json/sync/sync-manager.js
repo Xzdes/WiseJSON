@@ -107,11 +107,25 @@ class SyncManager extends EventEmitter {
         this.emit('sync:start', { lsn: this.lastKnownServerLSN });
 
         try {
-            if (!this._initialSyncComplete) {
-                await this._performInitialSync();
-                this._initialSyncComplete = true;
-            }
+            // --- ИСПРАВЛЕННАЯ ЛОГИКА НАЧАЛЬНОЙ СИНХРОНИЗАЦИИ ---
 
+            // Проверяем, есть ли у нас локальные изменения, которые нужно отправить ПЕРЕД начальной синхронизацией.
+            const walEntries = await readWal(this.collection.walPath, null, { recover: true, logger: this.logger });
+            const localWalEntries = walEntries.filter(entry => !entry._remote);
+
+            // Если у нас нет локальных изменений и мы ни разу не синхронизировались,
+            // то можно безопасно выполнить начальную полную синхронизацию (snapshot), которая перезатрет локальные данные.
+            if (!this._initialSyncComplete && localWalEntries.length === 0) {
+                await this._performInitialSync();
+            }
+            
+            // В любом случае, после этого ставим флаг, что попытка начальной синхронизации была.
+            // Если у клиента были локальные данные, он пропустит snapshot и сразу перейдет к PULL/PUSH.
+            this._initialSyncComplete = true; 
+
+            // --- КОНЕЦ ИСПРАВЛЕННОЙ ЛОГИКИ ---
+
+            // Теперь выполняем стандартный цикл PULL -> PUSH
             const pullActivity = await this._performPull();
             const pushActivity = await this._performPush();
             
@@ -191,20 +205,15 @@ class SyncManager extends EventEmitter {
     }
 
     async _performPush() {
-        // 1. Читаем все записи из WAL
         const allWalEntries = await readWal(this.collection.walPath, null, { recover: true, logger: this.logger });
-
-        // 2. ФИЛЬТРУЕМ! Оставляем только локальные изменения (те, у которых нет флага _remote)
         const localWalEntries = allWalEntries.filter(entry => !entry._remote);
 
-        // 3. Если после фильтрации ничего не осталось, то и отправлять нечего
         if (localWalEntries.length === 0) {
             return false;
         }
 
         let allBatchesPushedSuccessfully = true;
 
-        // 4. Итерируем по отфильтрованному массиву локальных изменений
         for (let i = 0; i < localWalEntries.length; i += this.pushBatchSize) {
             const batch = localWalEntries.slice(i, i + this.pushBatchSize);
             const batchId = uuidv4();
@@ -222,18 +231,16 @@ class SyncManager extends EventEmitter {
                     lsn: this.lastKnownServerLSN,
                 });
             } catch (err) {
-                // Если хоть один батч не прошел, прерываем PUSH и НЕ делаем компакцию.
                 allBatchesPushedSuccessfully = false;
                 throw new Error(`Push failed on batch ${batchId}: ${err.message}`);
             }
         }
         
-        // 5. Компакцию выполняем только если ВСЕ батчи из WAL были успешно отправлены.
         if (allBatchesPushedSuccessfully) {
             await this.collection.compactWalAfterPush();
         }
         
-        return true; // Активность была
+        return true;
     }
     
     async _performHeartbeat() {

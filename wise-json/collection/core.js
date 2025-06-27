@@ -178,8 +178,14 @@ class Collection {
         case 'INSERT': {
             const doc = entry.doc;
             if (!doc || !doc._id) throw new Error('Cannot apply INSERT: document or _id is missing.');
+            // Применяя удаленную операцию, мы уже проверили существование в _applyRemoteOperation.
+            // Применяя локальную, мы проверили в _enqueueDataModification.
+            // Эта проверка здесь нужна для целостности при прямом вызове или восстановлении из WAL.
             if (!isInitialLoad && this.documents.has(doc._id)) {
-                throw new Error(`Cannot apply INSERT: document with _id ${doc._id} already exists.`);
+                // Если это не удаленная операция, то это ошибка. Если удаленная, ее должны были отфильтровать раньше.
+                if (!entry._remote) {
+                    throw new Error(`Cannot apply INSERT: document with _id ${doc._id} already exists.`);
+                }
             }
             this.documents.set(doc._id, doc);
             this._indexManager.afterInsert(doc);
@@ -191,7 +197,9 @@ class Collection {
             if (!isInitialLoad) {
                 for (const doc of docs) {
                     if (!doc || !doc._id) throw new Error('Cannot apply BATCH_INSERT: a document or its _id is missing.');
-                    if (this.documents.has(doc._id)) throw new Error(`Cannot apply BATCH_INSERT: document with _id ${doc._id} already exists.`);
+                    if (this.documents.has(doc._id) && !entry._remote) {
+                        throw new Error(`Cannot apply BATCH_INSERT: document with _id ${doc._id} already exists.`);
+                    }
                 }
             }
             for (const doc of docs) {
@@ -215,7 +223,11 @@ class Collection {
                     if(emitEvents) this._emitter.emit('insert', newDoc);
                     return;
                 }
-                throw new Error(`Cannot apply UPDATE: document with id ${id} not found.`);
+                // Игнорируем ошибку для удаленных операций, т.к. могли уже удалить локально.
+                if (!entry._remote) {
+                    throw new Error(`Cannot apply UPDATE: document with id ${id} not found.`);
+                }
+                return;
             }
             
             if (!isAlive(prevDoc)) throw new Error(`Cannot apply UPDATE: document with id ${id} has expired.`);
@@ -480,16 +492,10 @@ class Collection {
     this._emitter.off(eventName, listener);
   }
   
-  // --- ИСПРАВЛЕНИЕ НАЧИНАЕТСЯ ЗДЕСЬ ---
   async compactWalAfterPush() {
-    // После успешной отправки данных на сервер, мы должны зафиксировать
-    // текущее состояние клиента, создав чекпоинт. Это сохранит данные
-    // в памяти на диск и позволит безопасно очистить WAL.
-    // Метод flushToDisk уже делает всё это.
     this.logger.log(`[Collection] Compacting local state for '${this.name}' after successful sync push by flushing to disk.`);
     return this.flushToDisk();
   }
-  // --- ИСПРАВЛЕНИЕ ЗАКАНЧИВАЕТСЯ ЗДЕСЬ ---
 
   enableSync(syncOptions) {
     if (this.syncManager) {
@@ -563,6 +569,7 @@ class Collection {
     });
   }
 
+  // --- ИСПРАВЛЕНИЕ НАЧИНАЕТСЯ ЗДЕСЬ ---
   async _applyRemoteOperation(remoteOp) {
     if (!remoteOp || !remoteOp.op) {
         this.logger.warn(`[Sync] Received invalid remote operation:`, remoteOp);
@@ -571,8 +578,21 @@ class Collection {
     
     const docId = remoteOp.id || remoteOp.doc?._id;
     const localDoc = docId ? this.documents.get(docId) : null;
-    const remoteTimestampStr = remoteOp.ts || remoteOp.doc?.updatedAt || remoteOp.data?.updatedAt;
 
+    // 1. Проверка на дублирующую вставку. Если документ уже есть, игнорируем.
+    if (remoteOp.op === 'INSERT' && localDoc) {
+        this.logger.debug(`[Sync] Ignored remote INSERT for existing document ID: ${docId}`);
+        return; 
+    }
+
+    // 2. Проверка на обновление несуществующего документа.
+    if (remoteOp.op === 'UPDATE' && !localDoc) {
+        this.logger.warn(`[Sync] Ignored remote UPDATE for non-existent document ID: ${docId}`);
+        return;
+    }
+
+    // 3. Конфликт версий по временной метке (если локальная версия новее).
+    const remoteTimestampStr = remoteOp.ts || remoteOp.doc?.updatedAt || remoteOp.data?.updatedAt;
     if (localDoc && remoteTimestampStr) {
         try {
             const remoteTimestamp = new Date(remoteTimestampStr).getTime();
@@ -583,6 +603,7 @@ class Collection {
                     type: 'ignored_remote', reason: 'local_is_newer', docId,
                     localTimestamp: localDoc.updatedAt, remoteTimestamp: remoteTimestampStr
                 });
+                this.logger.log(`[Sync] Ignored remote op for doc ${docId} because local version is newer.`);
                 return;
             }
         } catch (e) {
@@ -591,14 +612,18 @@ class Collection {
     }
 
     try {
+        // Теперь вызов _applyWalEntryToMemory более безопасен, т.к. основные проверки пройдены.
         this._applyWalEntryToMemory(remoteOp, true, false);
+        // Записываем в WAL, чтобы пережить перезапуск, с пометкой _remote.
         const entry = { ...remoteOp, _remote: true };
         await appendWalEntry(this.walPath, entry, this.logger);
     } catch (err) {
+        // Если ошибка все же произошла (например, нарушение уникального индекса), помещаем в карантин.
         this.logger.error(`[Sync] Failed to apply remote op. Quarantining. Op: ${JSON.stringify(remoteOp)}`, err.message);
         await this._quarantineOperation(remoteOp, err);
     }
   }
+  // --- ИСПРАВЛЕНИЕ ЗАКАНЧИВАЕТСЯ ЗДЕСЬ ---
   
   async _quarantineOperation(op, error) {
       const quarantineEntry = {

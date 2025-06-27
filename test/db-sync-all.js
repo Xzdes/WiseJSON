@@ -103,7 +103,6 @@ async function cleanUp() {
     }
 }
 
-// Упрощенная задержка
 const sleep = ms => new Promise(res => setTimeout(res, ms));
 
 
@@ -175,14 +174,25 @@ async function main() {
         const quarantineFile = col.quarantinePath;
         if (await fs.stat(quarantineFile).catch(()=>false)) await fs.unlink(quarantineFile);
         
-        serverState.opsLog.push({ op: 'UPDATE', id: 'doc-non-existent', data: "this is not an object" });
+        // --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+        // Создаем операцию, которая гарантированно вызовет ошибку внутри _applyWalEntryToMemory,
+        // но которую не отфильтрует наша новая логика в _applyRemoteOperation.
+        // Операция INSERT без поля `doc` вызовет ошибку.
+        serverState.opsLog.push({ op: 'INSERT', id: 'malformed-op-for-quarantine' });
+        // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
         await col.triggerSync();
         
-        await sleep(50);
+        await sleep(50); // Даем время на асинхронную запись в файл карантина
 
-        const quarantineContent = await fs.readFile(quarantineFile, 'utf-8').catch(() => '');
-        assert.ok(quarantineContent.includes('doc-non-existent'), 'Тест 5.1: Файл карантина должен содержать битую операцию');
-        await fs.unlink(quarantineFile).catch(() => {});
+        const quarantineExists = await fs.stat(quarantineFile).catch(() => false);
+        assert.ok(quarantineExists, 'Тест 5.1: Файл карантина должен быть создан');
+
+        if (quarantineExists) {
+            const quarantineContent = await fs.readFile(quarantineFile, 'utf-8').catch(() => '');
+            assert.ok(quarantineContent.includes('malformed-op-for-quarantine'), 'Тест 5.2: Файл карантина должен содержать битую операцию');
+            await fs.unlink(quarantineFile).catch(() => {});
+        }
         console.log('  --- Тест 5 PASSED ---');
 
     } finally {
@@ -196,7 +206,6 @@ async function main() {
 main().catch(err => {
     console.error('\n🔥 TEST FAILED:', err);
     if (err.stack) console.error(err.stack);
-    // Добавляем проверку, чтобы избежать ошибки 'finally'
     const stopPromise = stopMockServer() || Promise.resolve();
     stopPromise.finally(() => process.exit(1));
 });
