@@ -20,8 +20,7 @@ async function userProfileManagement() {
     await db.init();
     console.log('База данных профилей инициализирована.');
 
-    const profiles = await db.collection('profiles');
-    await profiles.initPromise;
+    const profiles = await db.getCollection('profiles');
     await profiles.clear(); // Очистим для чистоты примера
 
     // Создадим уникальный индекс по email для быстрого поиска и предотвращения дубликатов

@@ -23,8 +23,8 @@ async function main() {
     cleanUp();
 
     const db = new WiseJSON(DB_PATH, { ttlCleanupIntervalMs: 500 });
-    const users = await db.collection(USERS);
-    await users.initPromise;
+    // Используем новый API
+    const users = await db.getCollection(USERS);
 
     // 1. Вставка, чтение, индексы
     await users.insert({ name: 'Ivan', age: 25, group: 1 });
@@ -33,9 +33,11 @@ async function main() {
     await users.createIndex('group');
     await users.createIndex('name');
     assert.strictEqual(await users.count(), 3, 'Count after insert');
-    const byGroup = await users.findByIndexedValue('group', 1);
+    
+    // Заменяем устаревшие методы на find/findOne для консистентности
+    const byGroup = await users.find({ group: 1 });
     assert.strictEqual(byGroup.length, 2, 'Index query group=1');
-    const byName = await users.findOneByIndexedValue('name', 'Petr');
+    const byName = await users.findOne({ name: 'Petr' });
     assert(byName && byName.age === 30, 'Index query by name');
 
     // 2. Update/Remove/Drop Index
@@ -63,8 +65,8 @@ async function main() {
     await users.exportJson(file);
 
     // Новый лог коллекция
-    const logs = await db.collection(LOGS);
-    await logs.initPromise;
+    // ИСПРАВЛЕНО: Используем новый API
+    const logs = await db.getCollection(LOGS);
     await logs.insert({ msg: 'log1', level: 'info' });
 
     // Проверяем экспорт
@@ -87,12 +89,12 @@ async function main() {
 
     // 7. Recovery: повторно открываем коллекции, должны восстановиться все данные
     const db2 = new WiseJSON(DB_PATH);
-    const users2 = await db2.collection(USERS);
-    await users2.initPromise;
+    // ИСПРАВЛЕНО: Используем новый API
+    const users2 = await db2.getCollection(USERS);
     assert.strictEqual(await users2.count(), 4000, 'Recovery main');
 
-    const logs2 = await db2.collection(LOGS);
-    await logs2.initPromise;
+    // ИСПРАВЛЕНО: Используем новый API
+    const logs2 = await db2.getCollection(LOGS);
     assert.strictEqual(await logs2.count(), 1, 'Logs recovery');
 
     await db2.close();

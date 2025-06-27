@@ -94,9 +94,8 @@ async function main() {
   });
   await db.init(); // Important: wait for DB initialization
 
-  // Get (or create) a collection named 'users'
-  const users = await db.collection('users');
-  await users.initPromise; // Wait for the collection itself to initialize
+  // Get (or create) a fully initialized collection named 'users'
+  const users = await db.getCollection('users');
 
   // Clean up for a predictable run
   await users.clear();

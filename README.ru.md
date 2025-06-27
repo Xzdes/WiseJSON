@@ -95,8 +95,7 @@ async function main() {
   await db.init(); // Важно дождаться инициализации БД
 
   // Получение (или создание) коллекции 'users'
-  const users = await db.collection('users');
-  await users.initPromise; // Дожидаемся инициализации самой коллекции
+  const users = await db.getCollection('users');
 
   // Очистим для предсказуемого результата
   await users.clear();
