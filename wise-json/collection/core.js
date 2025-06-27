@@ -5,9 +5,8 @@ const fs = require('fs/promises');
 const { v4: uuidv4 } = require('uuid');
 const CollectionEventEmitter = require('./events.js');
 const IndexManager = require('./indexes.js');
-const logger = require('../logger');
 const SyncManager = require('../sync/sync-manager.js');
-const { UniqueConstraintError } = require('../errors.js'); // <--- ВАЖНО!
+const { UniqueConstraintError } = require('../errors.js');
 const {
   defaultIdGenerator,
   isNonEmptyString,
@@ -77,6 +76,9 @@ class Collection {
     this.dbRootPath = makeAbsolutePath(dbRootPath);
     this.options = validateCollectionOptions(options);
 
+    // +++ ИЗМЕНЕНИЕ: Получаем логгер из опций +++
+    this.logger = this.options.logger || require('../logger');
+
     this.collectionDirPath = path.resolve(this.dbRootPath, this.name);
     this.checkpointsDir = path.join(this.collectionDirPath, '_checkpoints');
     this.walPath = getWalPath(this.collectionDirPath, this.name);
@@ -87,7 +89,9 @@ class Collection {
     this.isPlainObject = isPlainObject;
 
     this._emitter = new CollectionEventEmitter(this.name);
-    this._indexManager = new IndexManager(this.name);
+    // +++ ИЗМЕНЕНИЕ: Передаем логгер в IndexManager +++
+    // Примечание: Это потребует изменения конструктора IndexManager
+    this._indexManager = new IndexManager(this.name); // Пока оставляем так, изменим IndexManager позже
 
     this._stats = {
         inserts: 0,
@@ -146,8 +150,11 @@ class Collection {
   async _initialize() {
     await fs.mkdir(this.collectionDirPath, { recursive: true });
     await fs.mkdir(this.checkpointsDir, { recursive: true });
+    
+    // Примечание: это потребует изменения функции initializeWal
     await initializeWal(this.walPath, this.collectionDirPath);
 
+    // Примечание: это потребует изменения функции loadLatestCheckpoint
     const loadedCheckpoint = await loadLatestCheckpoint(this.checkpointsDir, this.name);
     this.documents = loadedCheckpoint.documents;
     this._stats.lastCheckpointTimestamp = loadedCheckpoint.timestamp || null;
@@ -159,6 +166,7 @@ class Collection {
     }
     this._indexManager.rebuildIndexesFromData(this.documents);
 
+    // Примечание: это потребует изменения функции readWal
     const walReadOptsWithLoadFlag = { ...this.options.walReadOptions, isInitialLoad: true };
     const walEntries = await readWal(this.walPath, this._stats.lastCheckpointTimestamp, walReadOptsWithLoadFlag);
 
@@ -265,8 +273,7 @@ class Collection {
                     if (idxMeta.type === 'unique') {
                         const value = docToInsert[idxMeta.fieldName];
                            if (value !== undefined && value !== null && this._indexManager.findOneIdByIndex(idxMeta.fieldName, value)) {
-            // ЗАМЕНА ЗДЕСЬ
-            throw new UniqueConstraintError(idxMeta.fieldName, value);
+                                throw new UniqueConstraintError(idxMeta.fieldName, value);
                         }
                     }
                 }
@@ -280,11 +287,10 @@ class Collection {
                         for (const doc of docs) {
                             const value = doc[idxMeta.fieldName];
                             if (value !== undefined && value !== null) {
-                if (seenValues.has(value) || this._indexManager.findOneIdByIndex(idxMeta.fieldName, value)) {
-                // ЗАМЕНА ЗДЕСЬ
-                throw new UniqueConstraintError(idxMeta.fieldName, value);
-              }
-              seenValues.add(value);
+                                if (seenValues.has(value) || this._indexManager.findOneIdByIndex(idxMeta.fieldName, value)) {
+                                    throw new UniqueConstraintError(idxMeta.fieldName, value);
+                                }
+                                seenValues.add(value);
                             }
                         }
                     }
@@ -299,9 +305,8 @@ class Collection {
                         const newValue = data[idxMeta.fieldName];
                         if (newValue !== undefined && newValue !== null) {
                             const existingId = this._indexManager.findOneIdByIndex(idxMeta.fieldName, newValue);
-    if (existingId && existingId !== id) {
-              // ЗАМЕНА ЗДЕСЬ
-              throw new UniqueConstraintError(idxMeta.fieldName, newValue);
+                            if (existingId && existingId !== id) {
+                                throw new UniqueConstraintError(idxMeta.fieldName, newValue);
                             }
                         }
                     }
@@ -343,7 +348,7 @@ class Collection {
             try {
                 await this.flushToDisk();
             } catch (e) {
-                logger.error(`[Collection] Auto-checkpoint error for ${this.name}: ${e.message}`, e.stack);
+                this.logger.error(`[Collection] Auto-checkpoint error for ${this.name}: ${e.message}`, e.stack);
             }
         }, this.options.checkpointIntervalMs);
         if (this._checkpointTimerId && typeof this._checkpointTimerId.unref === 'function') {
@@ -366,10 +371,10 @@ class Collection {
             try {
                 const removedCount = cleanupExpiredDocs(this.documents, this._indexManager);
                 if (removedCount > 0) {
-                    logger.debug(`[Collection] [TTL] Auto-cleanup removed ${removedCount} docs from ${this.name}.`);
+                    this.logger.debug(`[Collection] [TTL] Auto-cleanup removed ${removedCount} docs from ${this.name}.`);
                 }
             } catch (e) {
-                logger.error(`[Collection] [TTL] Auto-cleanup error for ${this.name}: ${e.message}`, e.stack);
+                this.logger.error(`[Collection] [TTL] Auto-cleanup error for ${this.name}: ${e.message}`, e.stack);
             }
         }, this.options.ttlCleanupIntervalMs);
         if (this._ttlCleanupTimer && typeof this._ttlCleanupTimer.unref === 'function') {
@@ -390,7 +395,7 @@ class Collection {
     if (this.options.maxWalEntriesBeforeCheckpoint > 0 &&
         this._stats.walEntriesSinceCheckpoint >= this.options.maxWalEntriesBeforeCheckpoint) {
         this.flushToDisk().catch(e => {
-            logger.error(`[Collection] Auto-checkpoint (by WAL count) error for ${this.name}: ${e.message}`, e.stack);
+            this.logger.error(`[Collection] Auto-checkpoint (by WAL count) error for ${this.name}: ${e.message}`, e.stack);
         });
     }
   }
@@ -409,6 +414,7 @@ class Collection {
         
         const timestampForFile = timestamp.replace(/[:.]/g, '-');
         const metaPath = path.join(this.checkpointsDir, `checkpoint_meta_${this.name}_${timestampForFile}.json`);
+        // Примечание: это потребует изменения функции writeJsonFileSafe
         await writeJsonFileSafe(metaPath, meta);
 
         const aliveDocs = Array.from(this.documents.values());
@@ -439,9 +445,11 @@ class Collection {
         this._stats.lastCheckpointTimestamp = timestamp;
         this._stats.walEntriesSinceCheckpoint = 0;
 
+        // Примечание: это потребует изменения функции compactWal
         await compactWal(this.walPath, this._stats.lastCheckpointTimestamp);
 
         if (this.options.checkpointsToKeep > 0) {
+            // Примечание: это потребует изменения функции cleanupOldCheckpoints
             await cleanupOldCheckpoints(this.checkpointsDir, this.name, this.options.checkpointsToKeep);
         }
         
@@ -495,9 +503,9 @@ class Collection {
     return this._enqueue(async () => {
         try {
             await fs.writeFile(this.walPath, '', 'utf8');
-            logger.log(`[Collection] WAL for '${this.name}' compacted after successful sync push.`);
+            this.logger.log(`[Collection] WAL for '${this.name}' compacted after successful sync push.`);
         } catch(err) {
-            logger.error(`[Collection] Failed to compact WAL for '${this.name}' after push: ${err.message}`);
+            this.logger.error(`[Collection] Failed to compact WAL for '${this.name}' after push: ${err.message}`);
         }
     });
   }
@@ -506,13 +514,14 @@ class Collection {
 
   enableSync(syncOptions) {
     if (this.syncManager) {
-        logger.warn(`[Sync] Sync for collection '${this.name}' is already enabled.`);
+        this.logger.warn(`[Sync] Sync for collection '${this.name}' is already enabled.`);
         return;
     }
     const { url, apiKey, ...restOptions } = syncOptions;
     if (!url || !apiKey) {
         throw new Error('Sync requires `url` and `apiKey`.');
     }
+    // Примечание: это потребует изменения конструктора SyncManager
     this.syncManager = new SyncManager({ collection: this, ...syncOptions });
     
     const eventsToForward = [
@@ -531,13 +540,13 @@ class Collection {
     if (this.syncManager) {
         this.syncManager.stop();
         this.syncManager = null;
-        logger.log(`[Sync] Sync for collection '${this.name}' stopped.`);
+        this.logger.log(`[Sync] Sync for collection '${this.name}' stopped.`);
     }
   }
 
   async triggerSync() {
     if (!this.syncManager) {
-        logger.warn(`[Sync] Cannot trigger sync for '${this.name}', sync is not enabled.`);
+        this.logger.warn(`[Sync] Cannot trigger sync for '${this.name}', sync is not enabled.`);
         return Promise.resolve();
     }
     return this.syncManager.runSync();
@@ -574,7 +583,7 @@ class Collection {
 
   async _applyRemoteOperation(remoteOp) {
     if (!remoteOp || !remoteOp.op) {
-        logger.warn(`[Sync] Received invalid remote operation:`, remoteOp);
+        this.logger.warn(`[Sync] Received invalid remote operation:`, remoteOp);
         return;
     }
     
@@ -595,7 +604,7 @@ class Collection {
                 return;
             }
         } catch (e) {
-            logger.warn(`[Sync] Could not parse timestamp for conflict resolution. Error: ${e.message}`);
+            this.logger.warn(`[Sync] Could not parse timestamp for conflict resolution. Error: ${e.message}`);
         }
     }
 
@@ -604,7 +613,7 @@ class Collection {
         const entry = { ...remoteOp, _remote: true };
         await require('../wal-manager.js').appendWalEntry(this.walPath, entry);
     } catch (err) {
-        logger.error(`[Sync] Failed to apply remote op. Quarantining. Op: ${JSON.stringify(remoteOp)}`, err.message);
+        this.logger.error(`[Sync] Failed to apply remote op. Quarantining. Op: ${JSON.stringify(remoteOp)}`, err.message);
         await this._quarantineOperation(remoteOp, err);
     }
   }
@@ -622,7 +631,7 @@ class Collection {
           await fs.appendFile(this.quarantinePath, JSON.stringify(quarantineEntry) + '\n', 'utf8');
           this._emitter.emit('sync:quarantine', quarantineEntry);
       } catch (qErr) {
-          logger.error(`[Sync] CRITICAL: Failed to write to quarantine log file at ${this.quarantinePath}`, qErr);
+          this.logger.error(`[Sync] CRITICAL: Failed to write to quarantine log file at ${this.quarantinePath}`, qErr);
       }
   }
 
@@ -636,7 +645,7 @@ class Collection {
       case 'update': await this._applyTransactionUpdate(entry.args[0], entry.args[1], txidForLog, isInitialLoad); break;
       case 'remove': await this._applyTransactionRemove(entry.args[0], txidForLog, isInitialLoad); break;
       case 'clear': await this._applyTransactionClear(txidForLog, isInitialLoad); break;
-      default: logger.warn(`[Collection] Unknown transactional WAL op type '${entry.type}' for ${this.name}, txid: ${txidForLog}`);
+      default: this.logger.warn(`[Collection] Unknown transactional WAL op type '${entry.type}' for ${this.name}, txid: ${txidForLog}`);
     }
   }
   async _applyTransactionInsert(docData, txid, isInitialLoad = false) {

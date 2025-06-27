@@ -1,10 +1,12 @@
 // wise-json/index.js
 
 const path = require('path');
+const fs = require('fs/promises');
 const Collection = require('./collection/core.js');
 const TransactionManager = require('./collection/transaction-manager.js');
 const { makeAbsolutePath, validateOptions } = require('./collection/utils.js');
 const logger = require('./logger');
+const { ConfigurationError } = require('./errors.js');
 
 const DEFAULT_PATH = process.env.WISE_JSON_PATH || makeAbsolutePath('wise-json-db-data');
 
@@ -24,7 +26,9 @@ class WiseJSON {
         this.collections = {}; // Кэш для экземпляров коллекций
         this._activeTransactions = [];
 
-        // Устанавливаем обработчик корректного завершения только один раз
+        this._isInitialized = false;
+        this._initPromise = null;
+
         if (!WiseJSON._hasGracefulShutdown) {
             this._setupGracefulShutdown();
             WiseJSON._hasGracefulShutdown = true;
@@ -32,22 +36,48 @@ class WiseJSON {
     }
 
     /**
-     * Асинхронно инициализирует базу данных. В текущей реализации просто возвращает true,
-     * но зарезервирован для возможного расширения в будущем.
-     * @returns {Promise<boolean>}
+     * Асинхронно и потокобезопасно инициализирует базу данных.
+     * Если вызов init() уже в процессе, новый вызов вернет тот же самый промис.
+     * Если БД уже инициализирована, промис разрешится немедленно.
+     * @returns {Promise<void>}
      */
-    async init() {
-        // Здесь может быть логика проверки директории, прав доступа и т.д.
-        return true;
+    init() {
+        if (this._initPromise) {
+            return this._initPromise;
+        }
+
+        this._initPromise = (async () => {
+            try {
+                await fs.mkdir(this.dbRootPath, { recursive: true });
+                this._isInitialized = true;
+                logger.log(`[WiseJSON] Database at ${this.dbRootPath} initialized.`);
+            } catch (err) {
+                logger.error(`[WiseJSON] Critical error during database initialization at ${this.dbRootPath}:`, err);
+                this._initPromise = null;
+                throw err;
+            }
+        })();
+
+        return this._initPromise;
     }
 
     /**
-     * Синхронно получает или создает экземпляр коллекции, но не дожидается ее инициализации.
-     * Для большинства случаев используйте асинхронный метод `getCollection`.
+     * Внутренний метод для гарантии, что БД инициализирована перед операцией.
+     * @private
+     */
+    async _ensureInitialized() {
+        if (!this._isInitialized) {
+            await this.init();
+        }
+    }
+
+    /**
+     * Получает или создает экземпляр коллекции, но не дожидается ее полной инициализации.
      * @param {string} name - Имя коллекции.
      * @returns {Promise<Collection>} Промис, который разрешается экземпляром коллекции.
      */
     async collection(name) {
+        await this._ensureInitialized();
         if (!this.collections[name]) {
             this.collections[name] = new Collection(name, this.dbRootPath, this.options);
         }
@@ -56,51 +86,49 @@ class WiseJSON {
 
     /**
      * Асинхронно получает или создает коллекцию и дожидается ее полной инициализации.
-     * Это рекомендуемый способ получения коллекции для работы.
      * @param {string} name - Имя коллекции.
      * @returns {Promise<Collection>} Готовый к работе экземпляр коллекции.
      */
     async getCollection(name) {
         const collectionInstance = await this.collection(name);
-        // Дожидаемся, пока коллекция загрузит данные с диска (чекпоинт и WAL)
         await collectionInstance.initPromise;
         return collectionInstance;
     }
 
     /**
      * Возвращает имена всех существующих коллекций в базе данных.
-     * Сканирует директорию БД и возвращает имена подпапок.
      * @returns {Promise<string[]>} Массив с именами коллекций.
      */
     async getCollectionNames() {
-        const fs = require('fs/promises');
+        await this._ensureInitialized();
         try {
-            const dirs = await fs.readdir(this.dbRootPath, { withFileTypes: true });
-            return dirs
-                .filter(
-                    d =>
-                        d.isDirectory() &&
-                        !d.name.startsWith('.') && // Игнорируем скрытые папки
-                        d.name !== '_checkpoints' && // Игнорируем служебную папку чекпоинтов
-                        d.name !== 'node_modules'
+            const items = await fs.readdir(this.dbRootPath, { withFileTypes: true });
+            return items
+                .filter(item =>
+                    item.isDirectory() &&
+                    !item.name.startsWith('.') &&       // Игнорируем скрытые папки (например, .DS_Store)
+                    !item.name.endsWith('.lock') &&     // +++ ИСПРАВЛЕНИЕ: Игнорируем lock-директории
+                    item.name !== '_checkpoints' &&     // Игнорируем общую папку чекпоинтов, если она есть
+                    item.name !== 'node_modules'        // На всякий случай
                 )
-                .map(d => d.name);
+                .map(item => item.name);
         } catch (e) {
-            // Если директория БД не существует, возвращаем пустой массив
             if (e.code === 'ENOENT') {
                 return [];
             }
-            // Другие ошибки пробрасываем
             throw e;
         }
     }
 
     /**
      * Корректно закрывает все открытые коллекции, сохраняя все несохраненные данные на диск.
-     * Этот метод крайне важно вызывать перед завершением работы приложения.
      * @returns {Promise<void>}
      */
     async close() {
+        // Дожидаемся завершения инициализации, если она еще идет, перед закрытием
+        if (this._initPromise) {
+            await this._initPromise;
+        }
         const allCollections = Object.values(this.collections);
         for (const col of allCollections) {
             if (col && typeof col.close === 'function') {
@@ -110,37 +138,40 @@ class WiseJSON {
     }
 
     /**
-     * Устанавливает обработчики системных сигналов для корректного завершения
-     * и сохранения данных (graceful shutdown).
+     * Устанавливает обработчики системных сигналов для корректного завершения.
      * @private
      */
     _setupGracefulShutdown() {
         const signals = ['SIGINT', 'SIGTERM'];
         let isShuttingDown = false;
+        const shutdownHandler = async () => {
+            if (isShuttingDown) return;
+            isShuttingDown = true;
+            try {
+                logger.log(`\n[WiseJSON] Graceful shutdown initiated, saving all collections...`);
+                await this.close();
+                logger.log('[WiseJSON] All data saved. Shutting down.');
+            } catch (e) {
+                logger.error('[WiseJSON] Error during graceful shutdown:', e);
+            } finally {
+                // Даем логам время записаться и выходим
+                setTimeout(() => process.exit(0), 100);
+            }
+        };
         signals.forEach(signal => {
-            process.on(signal, async () => {
-                if (isShuttingDown) return;
-                isShuttingDown = true;
-                try {
-                    logger.log(`\n[WiseJSON] Received ${signal} signal, saving all collections...`);
-                    // 'this' в данном контексте будет указывать на первый созданный экземпляр WiseJSON.
-                    // Для мульти-инстанс окружения это может потребовать доработки.
-                    await this.close();
-                    logger.log('[WiseJSON] All data saved. Shutting down.');
-                } catch (e) {
-                    logger.error('[WiseJSON] Error during graceful shutdown:', e);
-                } finally {
-                    process.exit(0);
-                }
-            });
+            process.on(signal, shutdownHandler);
         });
     }
 
     /**
      * Начинает новую транзакцию, которая может затрагивать несколько коллекций.
      * @returns {TransactionManager} Объект менеджера транзакций.
+     * @throws {ConfigurationError} если база данных еще не инициализирована.
      */
     beginTransaction() {
+        if (!this._isInitialized) {
+            throw new ConfigurationError("Cannot begin transaction: database is not initialized. Call db.init() or an async method like getCollection() first.");
+        }
         const txn = new TransactionManager(this);
         this._activeTransactions.push(txn);
         return txn;
