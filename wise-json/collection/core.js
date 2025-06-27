@@ -18,6 +18,7 @@ const {
   readWal,
   getWalPath,
   compactWal,
+  appendWalEntry,
 } = require('../wal-manager.js');
 const {
   loadLatestCheckpoint,
@@ -76,7 +77,6 @@ class Collection {
     this.dbRootPath = makeAbsolutePath(dbRootPath);
     this.options = validateCollectionOptions(options);
 
-    // +++ ИЗМЕНЕНИЕ: Получаем логгер из опций +++
     this.logger = this.options.logger || require('../logger');
 
     this.collectionDirPath = path.resolve(this.dbRootPath, this.name);
@@ -89,9 +89,7 @@ class Collection {
     this.isPlainObject = isPlainObject;
 
     this._emitter = new CollectionEventEmitter(this.name);
-    // +++ ИЗМЕНЕНИЕ: Передаем логгер в IndexManager +++
-    // Примечание: Это потребует изменения конструктора IndexManager
-    this._indexManager = new IndexManager(this.name); // Пока оставляем так, изменим IndexManager позже
+    this._indexManager = new IndexManager(this.name, this.logger);
 
     this._stats = {
         inserts: 0,
@@ -108,40 +106,29 @@ class Collection {
     this.syncManager = null;
 
     createWriteQueue(this);
-
     this._bindApiMethods();
-
     this.initPromise = this._initialize();
   }
 
   _bindApiMethods() {
-    // CRUD operations
     this.insert = crudOps.insert.bind(this);
     this.insertMany = crudOps.insertMany.bind(this);
     this.update = crudOps.update.bind(this);
     this.remove = crudOps.remove.bind(this);
     this.removeMany = crudOps.removeMany.bind(this);
     this.clear = crudOps.clear.bind(this);
-
-    // Basic query methods
     this.getById = queryOps.getById.bind(this);
     this.getAll = queryOps.getAll.bind(this);
     this.count = queryOps.count.bind(this);
     this.find = queryOps.find.bind(this);
     this.findOne = queryOps.findOne.bind(this);
-
-    // MongoDB-style query methods
     this.updateOne = queryOps.updateOne.bind(this);
     this.updateMany = queryOps.updateMany.bind(this);
     this.findOneAndUpdate = queryOps.findOneAndUpdate.bind(this);
     this.deleteOne = queryOps.deleteOne.bind(this);
     this.deleteMany = queryOps.deleteMany.bind(this);
-
-    // Legacy index methods (for backward compatibility)
     this.findByIndexedValue = queryOps.findByIndexedValue.bind(this);
     this.findOneByIndexedValue = queryOps.findOneByIndexedValue.bind(this);
-
-    // Import/Export
     this.exportJson = dataExchangeOps.exportJson.bind(this);
     this.exportCsv = dataExchangeOps.exportCsv.bind(this);
     this.importJson = dataExchangeOps.importJson.bind(this);
@@ -151,24 +138,21 @@ class Collection {
     await fs.mkdir(this.collectionDirPath, { recursive: true });
     await fs.mkdir(this.checkpointsDir, { recursive: true });
     
-    // Примечание: это потребует изменения функции initializeWal
-    await initializeWal(this.walPath, this.collectionDirPath);
-
-    // Примечание: это потребует изменения функции loadLatestCheckpoint
-    const loadedCheckpoint = await loadLatestCheckpoint(this.checkpointsDir, this.name);
+    await initializeWal(this.walPath, this.collectionDirPath, this.logger);
+    const loadedCheckpoint = await loadLatestCheckpoint(this.checkpointsDir, this.name, this.logger);
+    
     this.documents = loadedCheckpoint.documents;
     this._stats.lastCheckpointTimestamp = loadedCheckpoint.timestamp || null;
 
     for (const indexMeta of loadedCheckpoint.indexesMeta || []) {
         try {
             this._indexManager.createIndex(indexMeta.fieldName, { unique: indexMeta.type === 'unique' });
-        } catch (e) { /* ignore if already exists */ }
+        } catch (e) { /* ignore */ }
     }
     this._indexManager.rebuildIndexesFromData(this.documents);
 
-    // Примечание: это потребует изменения функции readWal
-    const walReadOptsWithLoadFlag = { ...this.options.walReadOptions, isInitialLoad: true };
-    const walEntries = await readWal(this.walPath, this._stats.lastCheckpointTimestamp, walReadOptsWithLoadFlag);
+    const walReadOpts = { ...this.options.walReadOptions, isInitialLoad: true, logger: this.logger };
+    const walEntries = await readWal(this.walPath, this._stats.lastCheckpointTimestamp, walReadOpts);
 
     const isInitialLoad = true;
     for (const entry of walEntries) {
@@ -316,7 +300,7 @@ class Collection {
     }
 
     const entryWithOpId = { ...entry, opId: uuidv4() };
-    await require('../wal-manager.js').appendWalEntry(this.walPath, entryWithOpId);
+    await appendWalEntry(this.walPath, entryWithOpId, this.logger);
 
     this._applyWalEntryToMemory(entry, true);
     this._handlePotentialCheckpointTrigger();
@@ -414,43 +398,41 @@ class Collection {
         
         const timestampForFile = timestamp.replace(/[:.]/g, '-');
         const metaPath = path.join(this.checkpointsDir, `checkpoint_meta_${this.name}_${timestampForFile}.json`);
-        // Примечание: это потребует изменения функции writeJsonFileSafe
-        await writeJsonFileSafe(metaPath, meta);
+        
+        // Передаем логгер в утилиту
+        await writeJsonFileSafe(metaPath, meta, null, this.logger);
 
         const aliveDocs = Array.from(this.documents.values());
         const maxSegmentSize = this.options.maxSegmentSizeBytes;
         let segmentIndex = 0;
-        for (let i = 0; i < aliveDocs.length; i += 1000) {
-            let currentSegment = [];
-            let currentSize = 2;
-            const chunk = aliveDocs.slice(i, Math.min(i + 1000, aliveDocs.length));
-            for(const doc of chunk) {
-                const docStr = JSON.stringify(doc);
-                const docSize = Buffer.byteLength(docStr, 'utf8') + (currentSegment.length > 0 ? 1 : 0);
-                if (currentSize + docSize > maxSegmentSize && currentSegment.length > 0) {
-                    const dataPath = path.join(this.checkpointsDir, `checkpoint_data_${this.name}_${timestampForFile}_seg${segmentIndex++}.json`);
-                    await writeJsonFileSafe(dataPath, currentSegment);
-                    currentSegment = [];
-                    currentSize = 2;
-                }
-                currentSegment.push(doc);
-                currentSize += docSize;
-            }
-            if (currentSegment.length > 0) {
+        let currentSegment = [];
+        let currentSize = 2; // Start with size of "[]"
+
+        for (const doc of aliveDocs) {
+            const docStr = JSON.stringify(doc);
+            const docSize = Buffer.byteLength(docStr, 'utf8') + (currentSegment.length > 0 ? 1 : 0);
+            if (currentSize + docSize > maxSegmentSize && currentSegment.length > 0) {
                 const dataPath = path.join(this.checkpointsDir, `checkpoint_data_${this.name}_${timestampForFile}_seg${segmentIndex++}.json`);
-                await writeJsonFileSafe(dataPath, currentSegment);
+                await writeJsonFileSafe(dataPath, currentSegment, null, this.logger);
+                currentSegment = [];
+                currentSize = 2;
             }
+            currentSegment.push(doc);
+            currentSize += docSize;
+        }
+
+        if (currentSegment.length > 0) {
+            const dataPath = path.join(this.checkpointsDir, `checkpoint_data_${this.name}_${timestampForFile}_seg${segmentIndex++}.json`);
+            await writeJsonFileSafe(dataPath, currentSegment, null, this.logger);
         }
         
         this._stats.lastCheckpointTimestamp = timestamp;
         this._stats.walEntriesSinceCheckpoint = 0;
 
-        // Примечание: это потребует изменения функции compactWal
-        await compactWal(this.walPath, this._stats.lastCheckpointTimestamp);
+        await compactWal(this.walPath, this._stats.lastCheckpointTimestamp, this.logger);
 
         if (this.options.checkpointsToKeep > 0) {
-            // Примечание: это потребует изменения функции cleanupOldCheckpoints
-            await cleanupOldCheckpoints(this.checkpointsDir, this.name, this.options.checkpointsToKeep);
+            await cleanupOldCheckpoints(this.checkpointsDir, this.name, this.options.checkpointsToKeep, this.logger);
         }
         
         this._emitter.emit('checkpoint', { timestamp });
@@ -510,8 +492,6 @@ class Collection {
     });
   }
 
-  // --- SYNC METHODS ---
-
   enableSync(syncOptions) {
     if (this.syncManager) {
         this.logger.warn(`[Sync] Sync for collection '${this.name}' is already enabled.`);
@@ -521,8 +501,11 @@ class Collection {
     if (!url || !apiKey) {
         throw new Error('Sync requires `url` and `apiKey`.');
     }
-    // Примечание: это потребует изменения конструктора SyncManager
-    this.syncManager = new SyncManager({ collection: this, ...syncOptions });
+    this.syncManager = new SyncManager({ 
+        collection: this, 
+        logger: this.logger,
+        ...syncOptions 
+    });
     
     const eventsToForward = [
         'sync:start', 'sync:success', 'sync:error', 'sync:push_success',
@@ -611,7 +594,7 @@ class Collection {
     try {
         this._applyWalEntryToMemory(remoteOp, true, false);
         const entry = { ...remoteOp, _remote: true };
-        await require('../wal-manager.js').appendWalEntry(this.walPath, entry);
+        await appendWalEntry(this.walPath, entry, this.logger);
     } catch (err) {
         this.logger.error(`[Sync] Failed to apply remote op. Quarantining. Op: ${JSON.stringify(remoteOp)}`, err.message);
         await this._quarantineOperation(remoteOp, err);
@@ -634,8 +617,6 @@ class Collection {
           this.logger.error(`[Sync] CRITICAL: Failed to write to quarantine log file at ${this.quarantinePath}`, qErr);
       }
   }
-
-  // --- TRANSACTION METHODS ---
 
   async _applyTransactionWalOp(entry, isInitialLoad = false) {
     const txidForLog = entry.txid || entry.id || 'unknown_txid';

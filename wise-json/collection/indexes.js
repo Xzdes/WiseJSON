@@ -1,12 +1,19 @@
 // wise-json/collection/indexes.js
-const logger = require('../logger'); // Убедитесь, что logger импортирован
+
+// const logger = require('../logger'); // --- УДАЛЕНО: Глобальный импорт больше не нужен.
 
 /**
  * Управляет индексами коллекции.
  */
 class IndexManager {
-    constructor(collectionName = 'unknown') {
+    /**
+     * @param {string} [collectionName='unknown'] - Имя коллекции для логирования.
+     * @param {object} [logger] - Экземпляр логгера. Если не передан, будет использован логгер по умолчанию.
+     */
+    constructor(collectionName = 'unknown', logger) {
         this.collectionName = collectionName;
+        // +++ ИЗМЕНЕНИЕ: Сохраняем переданный логгер или используем фоллбэк.
+        this.logger = logger || require('../logger');
         this.indexes = new Map();     // fieldName -> { type, data, fieldName }
         this.indexedFields = new Set();
     }
@@ -18,25 +25,20 @@ class IndexManager {
      */
     createIndex(fieldName, options = {}) {
         if (!fieldName || typeof fieldName !== 'string') {
-            // Оставляем throw Error для невалидных входных данных, но логируем через logger
-            logger.error(`[IndexManager] fieldName должен быть строкой для коллекции '${this.collectionName}', получено: ${typeof fieldName} ('${fieldName}')`);
+            this.logger.error(`[IndexManager] fieldName должен быть строкой для коллекции '${this.collectionName}', получено: ${typeof fieldName} ('${fieldName}')`);
             throw new Error(`IndexManager: fieldName должен быть непустой строкой`);
         }
 
         if (this.indexes.has(fieldName)) {
-            // ИЗМЕНЕНИЕ ЗДЕСЬ: Вместо ошибки - предупреждение и выход
             const existingIndex = this.indexes.get(fieldName);
             const newIsUnique = options.unique === true;
             const existingIsUnique = existingIndex.type === 'unique';
 
             if (newIsUnique === existingIsUnique) {
-                logger.warn(`[IndexManager] Индекс по полю '${fieldName}' (type: ${existingIndex.type}) для коллекции '${this.collectionName}' уже существует — создание пропускается.`);
-                return; // Просто выходим, не создавая заново и не бросая ошибку
+                this.logger.warn(`[IndexManager] Индекс по полю '${fieldName}' (type: ${existingIndex.type}) для коллекции '${this.collectionName}' уже существует — создание пропускается.`);
+                return;
             } else {
-                // Попытка изменить тип существующего индекса (например, standard на unique)
-                // Это более сложный случай. Текущая логика - бросить ошибку.
-                // Можно было бы сначала удалить старый, потом создать новый, но это потенциально длительная операция.
-                logger.error(`[IndexManager] Попытка изменить тип существующего индекса для поля '${fieldName}' в коллекции '${this.collectionName}'. Существующий: ${existingIndex.type}, Новый: ${newIsUnique ? 'unique' : 'standard'}. Удалите старый индекс перед созданием нового с другим типом.`);
+                this.logger.error(`[IndexManager] Попытка изменить тип существующего индекса для поля '${fieldName}' в коллекции '${this.collectionName}'. Существующий: ${existingIndex.type}, Новый: ${newIsUnique ? 'unique' : 'standard'}. Удалите старый индекс перед созданием нового с другим типом.`);
                 throw new Error(`IndexManager: индекс по полю '${fieldName}' уже существует с другим типом. Удалите его перед повторным созданием.`);
             }
         }
@@ -51,7 +53,7 @@ class IndexManager {
 
         this.indexes.set(fieldName, index);
         this.indexedFields.add(fieldName);
-        logger.log(`[IndexManager] Индекс по полю '${fieldName}' (type: ${index.type}) для коллекции '${this.collectionName}' успешно создан.`);
+        this.logger.log(`[IndexManager] Индекс по полю '${fieldName}' (type: ${index.type}) для коллекции '${this.collectionName}' успешно создан.`);
     }
 
     /**
@@ -60,12 +62,12 @@ class IndexManager {
      */
     dropIndex(fieldName) {
         if (!this.indexes.has(fieldName)) {
-            logger.warn(`[IndexManager] Попытка удалить несуществующий индекс по полю '${fieldName}' для коллекции '${this.collectionName}'. Операция пропущена.`);
+            this.logger.warn(`[IndexManager] Попытка удалить несуществующий индекс по полю '${fieldName}' для коллекции '${this.collectionName}'. Операция пропущена.`);
             return;
         }
         this.indexes.delete(fieldName);
         this.indexedFields.delete(fieldName);
-        logger.log(`[IndexManager] Индекс по полю '${fieldName}' для коллекции '${this.collectionName}' успешно удален.`);
+        this.logger.log(`[IndexManager] Индекс по полю '${fieldName}' для коллекции '${this.collectionName}' успешно удален.`);
     }
 
     /**
@@ -84,19 +86,15 @@ class IndexManager {
      * @param {Map<string, object>} documents
      */
     rebuildIndexesFromData(documents) {
-        // logger.debug(`[IndexManager] Начало перестроения индексов для коллекции '${this.collectionName}'... Полей для индексации: ${this.indexedFields.size}`);
         for (const fieldName of this.indexedFields) {
             const def = this.indexes.get(fieldName);
-            if (!def) { // На всякий случай, если indexedFields и indexes рассинхронизированы
-                logger.warn(`[IndexManager] Определение индекса для поля '${fieldName}' не найдено при перестроении в коллекции '${this.collectionName}'.`);
+            if (!def) {
+                this.logger.warn(`[IndexManager] Определение индекса для поля '${fieldName}' не найдено при перестроении в коллекции '${this.collectionName}'.`);
                 continue;
             }
-            def.data.clear(); // Очищаем старые данные индекса
+            def.data.clear();
 
-            // logger.debug(`[IndexManager] Перестроение индекса '${fieldName}' (type: ${def.type}) для коллекции '${this.collectionName}'...`);
-            let count = 0;
             for (const [id, doc] of documents.entries()) {
-                // Убедимся, что документ является объектом
                 if (typeof doc !== 'object' || doc === null) continue;
 
                 const value = doc[fieldName];
@@ -104,27 +102,19 @@ class IndexManager {
                 if (def.type === 'unique') {
                     if (value !== undefined && value !== null) {
                         if (def.data.has(value)) {
-                            // Это предупреждение важно, но не должно останавливать процесс перестроения.
-                            // Оно указывает на нарушение уникальности в самих данных.
-                            logger.warn(`[IndexManager] Нарушение уникальности при перестроении индекса '${fieldName}' в коллекции '${this.collectionName}'. Значение '${value}' уже привязано к ID '${def.data.get(value)}', новый ID '${id}' будет проигнорирован для этого значения.`);
+                            this.logger.warn(`[IndexManager] Нарушение уникальности при перестроении индекса '${fieldName}' в коллекции '${this.collectionName}'. Значение '${value}' уже привязано к ID '${def.data.get(value)}', новый ID '${id}' будет проигнорирован для этого значения.`);
                         } else {
                             def.data.set(value, id);
-                            count++;
                         }
                     }
                 } else { // standard
-                    // Для неуникальных индексов значение может быть любым, включая undefined/null
-                    // Ключом в Map будет само значение (undefined, null, строка, число и т.д.)
                     if (!def.data.has(value)) {
                         def.data.set(value, new Set());
                     }
                     def.data.get(value).add(id);
-                    count++;
                 }
             }
-            // logger.debug(`[IndexManager] Индекс '${fieldName}' для коллекции '${this.collectionName}' перестроен. Записей в индексе: ${count} (реальный размер Map: ${def.data.size}).`);
         }
-        // logger.log(`[IndexManager] Все индексы для коллекции '${this.collectionName}' перестроены.`);
     }
 
     /**
@@ -132,7 +122,7 @@ class IndexManager {
      * @param {object} doc
      */
     afterInsert(doc) {
-        if (typeof doc !== 'object' || doc === null) return; // Защита
+        if (typeof doc !== 'object' || doc === null) return;
         for (const fieldName of this.indexedFields) {
             const def = this.indexes.get(fieldName);
             if (!def) continue;
@@ -140,13 +130,8 @@ class IndexManager {
 
             if (def.type === 'unique') {
                 if (value !== undefined && value !== null) {
-                    // Проверка на дубликат должна была быть выполнена *до* записи в WAL и применения в памяти,
-                    // но на всякий случай можно оставить проверку или просто доверять предварительной.
-                    // Если тут возникает ошибка - это серьезная проблема в логике предварительных проверок.
                     if (def.data.has(value) && def.data.get(value) !== doc._id) {
-                         logger.error(`[IndexManager] КРИТИЧЕСКАЯ ОШИБКА: Дубликат значения '${value}' в уникальном индексе '${fieldName}' (коллекция '${this.collectionName}') обнаружен ПОСЛЕ вставки документа ID '${doc._id}'. Этого не должно было произойти.`);
-                        // Бросать ошибку здесь может быть опасно, т.к. данные уже в WAL/памяти.
-                        // Лучше залоггировать как критическую и, возможно, пометить индекс как "неконсистентный".
+                         this.logger.error(`[IndexManager] КРИТИЧЕСКАЯ ОШИБКА: Дубликат значения '${value}' в уникальном индексе '${fieldName}' (коллекция '${this.collectionName}') обнаружен ПОСЛЕ вставки документа ID '${doc._id}'. Этого не должно было произойти.`);
                     }
                     def.data.set(value, doc._id);
                 }
@@ -162,14 +147,14 @@ class IndexManager {
      * @param {object} doc
      */
     afterRemove(doc) {
-        if (typeof doc !== 'object' || doc === null) return; // Защита
+        if (typeof doc !== 'object' || doc === null) return;
         for (const fieldName of this.indexedFields) {
             const def = this.indexes.get(fieldName);
             if (!def) continue;
             const value = doc[fieldName];
 
             if (def.type === 'unique') {
-                if (value !== undefined && value !== null) { // Только если значение было, и оно не null/undefined
+                if (value !== undefined && value !== null) {
                     if (def.data.get(value) === doc._id) {
                         def.data.delete(value);
                     }
@@ -190,7 +175,7 @@ class IndexManager {
      * @param {object} newDoc
      */
     afterUpdate(oldDoc, newDoc) {
-        if (typeof oldDoc !== 'object' || oldDoc === null || typeof newDoc !== 'object' || newDoc === null) return; // Защита
+        if (typeof oldDoc !== 'object' || oldDoc === null || typeof newDoc !== 'object' || newDoc === null) return;
 
         for (const fieldName of this.indexedFields) {
             const def = this.indexes.get(fieldName);
@@ -199,9 +184,6 @@ class IndexManager {
             const oldVal = oldDoc[fieldName];
             const newVal = newDoc[fieldName];
 
-            // Обновляем индекс только если значение поля изменилось
-            // или если это поле является индексируемым и могло быть undefined в старом документе
-            // и появилось в новом (или наоборот).
             if (oldVal !== newVal || (newDoc.hasOwnProperty(fieldName) && oldDoc[fieldName] === undefined) || (oldDoc.hasOwnProperty(fieldName) && newDoc[fieldName] === undefined)) {
                 // Удаляем старое значение из индекса
                 if (def.type === 'unique') {
@@ -221,14 +203,13 @@ class IndexManager {
                 // Добавляем новое значение в индекс
                 if (def.type === 'unique') {
                     if (newVal !== undefined && newVal !== null) {
-                        // Опять же, проверка на дубликат должна была быть до WAL.
                         if (def.data.has(newVal) && def.data.get(newVal) !== newDoc._id) {
-                            logger.error(`[IndexManager] КРИТИЧЕСКАЯ ОШИБКА: Дубликат значения '${newVal}' в уникальном индексе '${fieldName}' (коллекция '${this.collectionName}') обнаружен ПОСЛЕ обновления документа ID '${newDoc._id}'.`);
+                            this.logger.error(`[IndexManager] КРИТИЧЕСКАЯ ОШИБКА: Дубликат значения '${newVal}' в уникальном индексе '${fieldName}' (коллекция '${this.collectionName}') обнаружен ПОСЛЕ обновления документа ID '${newDoc._id}'.`);
                         }
                         def.data.set(newVal, newDoc._id);
                     }
                 } else { // standard
-                    if (newVal !== undefined || newVal === null) { // Индексируем null, но не undefined (если только он не был ключом)
+                    if (newVal !== undefined || newVal === null) {
                         if (!def.data.has(newVal)) def.data.set(newVal, new Set());
                         def.data.get(newVal).add(newDoc._id);
                     }
@@ -246,10 +227,9 @@ class IndexManager {
     findOneIdByIndex(fieldName, value) {
         const def = this.indexes.get(fieldName);
         if (!def || def.type !== 'unique') {
-            // logger.debug(`[IndexManager] Попытка найти по уникальному индексу '${fieldName}', но индекс не найден или не уникален для коллекции '${this.collectionName}'.`);
             return null;
         }
-        return def.data.get(value) || null; // Возвращает ID или undefined, которое преобразуется в null
+        return def.data.get(value) || null;
     }
 
     /**
@@ -261,18 +241,15 @@ class IndexManager {
     findIdsByIndex(fieldName, value) {
         const def = this.indexes.get(fieldName);
         if (!def || def.type !== 'standard') {
-            // logger.debug(`[IndexManager] Попытка найти по стандартному индексу '${fieldName}', но индекс не найден или не стандартный для коллекции '${this.collectionName}'.`);
             return new Set();
         }
-        return def.data.get(value) || new Set(); // Возвращает Set ID или пустой Set
+        return def.data.get(value) || new Set();
     }
 
     /**
      * Очистка всех данных индексов.
-     * Вызывается, например, при collection.clear().
      */
     clearAllData() {
-        // logger.debug(`[IndexManager] Очистка всех данных для всех индексов коллекции '${this.collectionName}'.`);
         for (const def of this.indexes.values()) {
             def.data.clear();
         }

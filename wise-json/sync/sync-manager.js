@@ -3,7 +3,7 @@
 const { v4: uuidv4 } = require('uuid');
 const EventEmitter = require('events');
 const { readWal } = require('../wal-manager.js');
-const logger = require('../logger');
+// const logger = require('../logger'); // --- УДАЛЕНО: Глобальный импорт больше не нужен.
 
 /**
  * SyncManager - orchestrates robust, two-way synchronization with a remote server.
@@ -15,6 +15,7 @@ class SyncManager extends EventEmitter {
      * @param {object} params
      * @param {import('../collection/core')} params.collection - The collection instance to sync.
      * @param {object} params.apiClient - The API client for server communication.
+     * @param {object} [params.logger] - Optional logger instance.
      * @param {number} [params.minSyncIntervalMs=5000] - The base interval for sync attempts.
      * @param {number} [params.maxSyncIntervalMs=60000] - The maximum interval for adaptive backoff.
      * @param {number} [params.heartbeatIntervalMs=30000] - How often to send a heartbeat if no other activity.
@@ -24,11 +25,12 @@ class SyncManager extends EventEmitter {
     constructor({
         collection,
         apiClient,
+        logger, // +++ ИЗМЕНЕНИЕ: Принимаем logger
         minSyncIntervalMs = 5000,
         maxSyncIntervalMs = 60000,
         heartbeatIntervalMs = 30000,
         pushBatchSize = 100,
-        autoStartLoop = true, // Новая опция для контроля в тестах
+        autoStartLoop = true,
     }) {
         super();
         if (!collection || !apiClient) {
@@ -43,6 +45,9 @@ class SyncManager extends EventEmitter {
         this.heartbeatIntervalMs = heartbeatIntervalMs;
         this.autoStartLoop = autoStartLoop;
 
+        // +++ ИЗМЕНЕНИЕ: Сохраняем логгер с фоллбэком
+        this.logger = logger || require('../logger');
+
         this._state = 'stopped'; // stopped, idle, syncing, error
         this._isSyncing = false;
         this._initialSyncComplete = false;
@@ -56,7 +61,8 @@ class SyncManager extends EventEmitter {
 
     start() {
         if (this._state !== 'stopped') return;
-        logger.log(`[SyncManager] Starting for collection '${this.collection.name}'.`);
+        // +++ ИЗМЕНЕНИЕ: Используем this.logger
+        this.logger.log(`[SyncManager] Starting for collection '${this.collection.name}'.`);
         this._state = 'idle';
         if (this.autoStartLoop) {
             this._runLoop();
@@ -69,7 +75,8 @@ class SyncManager extends EventEmitter {
             this._timeoutId = null;
         }
         this._state = 'stopped';
-        logger.log(`[SyncManager] Stopped for collection '${this.collection.name}'.`);
+        // +++ ИЗМЕНЕНИЕ: Используем this.logger
+        this.logger.log(`[SyncManager] Stopped for collection '${this.collection.name}'.`);
     }
 
     getStatus() {
@@ -197,7 +204,8 @@ class SyncManager extends EventEmitter {
 
     async _performPush() {
         // We read all WAL entries since they represent local truth. The server will handle duplicates.
-        const walEntries = await readWal(this.collection.walPath, null, { recover: true });
+        // +++ ИЗМЕНЕНИЕ: Передаем логгер в readWal через опции
+        const walEntries = await readWal(this.collection.walPath, null, { recover: true, logger: this.logger });
 
         if (walEntries.length === 0) {
             return false; // No activity
