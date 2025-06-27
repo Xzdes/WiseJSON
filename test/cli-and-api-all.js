@@ -7,7 +7,8 @@ const http = require('http');
 const assert = require('assert');
 
 const DB_PATH = path.resolve(__dirname, 'cli-and-api-db');
-const CLI_PATH = `node ${path.resolve(__dirname, '../explorer/cli.js')}`;
+// ИЗМЕНЕНИЕ: Путь к новому CLI
+const CLI_PATH = `node ${path.resolve(__dirname, '../cli/index.js')}`;
 const SERVER_PATH = path.resolve(__dirname, '../explorer/server.js');
 const BASE_URL = 'http://127.0.0.1:3101';
 const TEST_COLLECTION = 'cliapi_users';
@@ -17,11 +18,9 @@ const EXPORT_CSV = path.join(__dirname, 'cliapi-export.csv');
 const AUTH_USER = 'apitest';
 const AUTH_PASS = 'secret';
 
-// Добавляем функцию задержки
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
 function cleanUp() {
-    // ИСПРАВЛЕНИЕ: Добавляем флаги recursive и force для надежного удаления
     if (fs.existsSync(DB_PATH)) {
         fs.rmSync(DB_PATH, { recursive: true, force: true });
     }
@@ -30,7 +29,6 @@ function cleanUp() {
             try {
                 fs.unlinkSync(f);
             } catch (e) {
-                // Игнорируем ошибки при удалении, если файл занят
                 console.warn(`Could not delete temp file ${f}: ${e.message}`);
             }
         }
@@ -38,6 +36,7 @@ function cleanUp() {
 }
 
 function runCli(command, opts = {}) {
+    // Устанавливаем WISE_JSON_PATH для всех вызовов
     const env = { ...process.env, WISE_JSON_PATH: DB_PATH, LOG_LEVEL: 'none' };
     const fullCommand = `${CLI_PATH} ${command}`;
     try {
@@ -96,9 +95,11 @@ async function main() {
         const testUsers = Array.from({ length: 30 }, (_, i) => ({ name: `User${i}`, age: 20 + i, group: i % 3 }));
         fs.writeFileSync(DATA_FILE, JSON.stringify(testUsers, null, 2));
 
-        runCli(`import-collection ${TEST_COLLECTION} ${DATA_FILE} --mode replace --allow-write`);
-        runCli(`export-collection ${TEST_COLLECTION} ${EXPORT_JSON} --allow-write`);
-        runCli(`export-collection ${TEST_COLLECTION} ${EXPORT_CSV} --output csv --allow-write`);
+        // ИЗМЕНЕНИЕ: Используем синтаксис нового CLI
+        runCli(`import-collection ${TEST_COLLECTION} ${DATA_FILE} --mode=replace --allow-write`);
+        // Экспорт - операция чтения, --allow-write не нужен
+        runCli(`export-collection ${TEST_COLLECTION} ${EXPORT_JSON}`);
+        runCli(`export-collection ${TEST_COLLECTION} ${EXPORT_CSV} --output=csv`);
 
         assert(fs.existsSync(EXPORT_JSON), 'JSON export file should be created');
         assert(fs.existsSync(EXPORT_CSV), 'CSV export file should be created');
@@ -125,6 +126,7 @@ async function main() {
         const collections = await fetchJson(`${BASE_URL}/api/collections`, { auth: true });
         assert(collections.data.some(c => c.name === TEST_COLLECTION), 'API: test collection should exist');
         
+        // ВАЖНО: API сервера использует другой синтаксис фильтрации, это нормально
         const docs = await fetchJson(`${BASE_URL}/api/collections/${TEST_COLLECTION}?limit=5`, { auth: true });
         assert.strictEqual(docs.data.length, 5, 'API: limit should work');
         
@@ -142,7 +144,6 @@ async function main() {
         if (serverProc) {
             serverProc.kill();
         }
-        // ИСПРАВЛЕНИЕ: Добавляем небольшую задержку перед очисткой
         await sleep(200);
         cleanUp();
     }

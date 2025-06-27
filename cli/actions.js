@@ -13,7 +13,9 @@ async function assertCollectionExists(db, collectionName) {
     }
 }
 
+// =============================
 // --- Read-Only Actions ---
+// =============================
 
 async function listCollectionsAction(db) {
   const collections = await db.getCollectionNames();
@@ -90,7 +92,31 @@ async function getDocumentAction(db, [collectionName, docId]) {
     console.log(JSON.stringify(doc, null, 2));
 }
 
+async function exportCollectionAction(db, [collectionName, filePath], options) {
+  if (!collectionName || !filePath) prettyError('Usage: export-collection <collection> <file>');
+  await assertCollectionExists(db, collectionName);
+  
+  const col = await db.collection(collectionName);
+  await col.initPromise;
+
+  const outputFormat = options.output || 'json';
+  const absoluteFilePath = path.resolve(process.cwd(), filePath);
+
+  try {
+      if (outputFormat === 'csv') {
+          await col.exportCsv(absoluteFilePath);
+      } else {
+          await col.exportJson(absoluteFilePath);
+      }
+      console.log(`Collection "${collectionName}" exported to ${absoluteFilePath} as ${outputFormat}.`);
+  } catch (e) {
+      prettyError(`Failed to export to file: ${e.message}`);
+  }
+}
+
+// =============================
 // --- Write Actions ---
+// =============================
 
 async function createIndexAction(db, [collectionName, fieldName], options) {
   if (!collectionName || !fieldName) prettyError('Usage: create-index <collection> <field> [--unique]');
@@ -141,15 +167,45 @@ async function dropCollectionAction(db, [collectionName], options) {
     }
 }
 
+async function insertDocumentAction(db, [collectionName, jsonString]) {
+    if (!collectionName || !jsonString) prettyError('Usage: doc-insert <collection> <json_string>');
+    const col = await db.collection(collectionName);
+    await col.initPromise;
+    try {
+        const doc = JSON.parse(jsonString);
+        const inserted = await col.insert(doc);
+        console.log(JSON.stringify(inserted, null, 2));
+    } catch (e) {
+        prettyError(`Failed to insert document. Invalid JSON or db error: ${e.message}`);
+    }
+}
+
+async function removeDocumentAction(db, [collectionName, docId]) {
+    if (!collectionName || !docId) prettyError('Usage: doc-remove <collection> <docId>');
+    await assertCollectionExists(db, collectionName);
+    const col = await db.collection(collectionName);
+    await col.initPromise;
+    const success = await col.remove(docId);
+    if (!success) {
+        prettyError(`Document with ID "${docId}" not found for removal.`);
+    }
+    console.log(`Document "${docId}" removed from "${collectionName}".`);
+}
+
 // --- Реестр команд ---
 module.exports = {
+  // Read-only
   'list-collections': { handler: listCollectionsAction, isWrite: false, description: 'Lists all collections and their document counts.' },
   'show-collection':  { handler: showCollectionAction,  isWrite: false, description: 'Shows documents in a collection with pagination and filtering.' },
   'list-indexes':     { handler: listIndexesAction,     isWrite: false, description: 'Lists indexes for a collection.'},
   'get-document':     { handler: getDocumentAction,     isWrite: false, description: 'Gets a single document by its ID.'},
-
+  'export-collection':{ handler: exportCollectionAction,isWrite: false, description: 'Exports a collection to a file. Use --output=csv for CSV.' },
+  
+  // Write-enabled
   'create-index':     { handler: createIndexAction,     isWrite: true, description: 'Creates an index on a field. Use --unique for a unique index.' },
   'drop-index':       { handler: dropIndexAction,       isWrite: true, description: 'Drops an index from a collection.' },
   'import-collection':{ handler: importCollectionAction,isWrite: true, description: 'Imports documents from a JSON file. Use --mode=replace to clear first.' },
   'collection-drop':  { handler: dropCollectionAction,  isWrite: true, description: 'Permanently deletes an entire collection. Use with caution.' },
+  'doc-insert':       { handler: insertDocumentAction,  isWrite: true, description: 'Inserts a single document from a JSON string.' },
+  'doc-remove':       { handler: removeDocumentAction,  isWrite: true, description: 'Removes a single document by its ID.' },
 };

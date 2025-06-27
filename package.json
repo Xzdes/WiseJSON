@@ -60,8 +60,7 @@
     "node": ">=14.0.0"
   },
   "bin": {
-    "wise-json": "cli/index.js",
-    "wisejson-explorer": "./explorer/cli.js"
+    "wise-json": "cli/index.js"
   },
   "dependencies": {
     "proper-lockfile": "^4.1.2",
