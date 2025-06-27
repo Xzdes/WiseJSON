@@ -178,11 +178,7 @@ class Collection {
         case 'INSERT': {
             const doc = entry.doc;
             if (!doc || !doc._id) throw new Error('Cannot apply INSERT: document or _id is missing.');
-            // Применяя удаленную операцию, мы уже проверили существование в _applyRemoteOperation.
-            // Применяя локальную, мы проверили в _enqueueDataModification.
-            // Эта проверка здесь нужна для целостности при прямом вызове или восстановлении из WAL.
             if (!isInitialLoad && this.documents.has(doc._id)) {
-                // Если это не удаленная операция, то это ошибка. Если удаленная, ее должны были отфильтровать раньше.
                 if (!entry._remote) {
                     throw new Error(`Cannot apply INSERT: document with _id ${doc._id} already exists.`);
                 }
@@ -223,7 +219,6 @@ class Collection {
                     if(emitEvents) this._emitter.emit('insert', newDoc);
                     return;
                 }
-                // Игнорируем ошибку для удаленных операций, т.к. могли уже удалить локально.
                 if (!entry._remote) {
                     throw new Error(`Cannot apply UPDATE: document with id ${id} not found.`);
                 }
@@ -417,7 +412,7 @@ class Collection {
         const maxSegmentSize = this.options.maxSegmentSizeBytes;
         let segmentIndex = 0;
         let currentSegment = [];
-        let currentSize = 2; // Start with size of "[]"
+        let currentSize = 2; 
 
         for (const doc of aliveDocs) {
             const docStr = JSON.stringify(doc);
@@ -575,53 +570,52 @@ class Collection {
         this.logger.warn(`[Sync] Received invalid remote operation:`, remoteOp);
         return;
     }
-    
-    const docId = remoteOp.id || remoteOp.doc?._id;
-    const localDoc = docId ? this.documents.get(docId) : null;
 
-    // 1. Проверка на дублирующую вставку. Если документ уже есть, игнорируем.
-    if (remoteOp.op === 'INSERT' && localDoc) {
+    // Ставим всю логику применения удаленной операции в очередь,
+    // чтобы избежать гонок данных при одновременных PUSH-запросах на сервере.
+    return this._enqueue(async () => {
+      const docId = remoteOp.id || remoteOp.doc?._id;
+      const localDoc = docId ? this.documents.get(docId) : null;
+  
+      if (remoteOp.op === 'INSERT' && localDoc) {
         this.logger.debug(`[Sync] Ignored remote INSERT for existing document ID: ${docId}`);
-        return; 
-    }
-
-    // 2. Проверка на обновление несуществующего документа.
-    if (remoteOp.op === 'UPDATE' && !localDoc) {
+        return;
+      }
+  
+      if (remoteOp.op === 'UPDATE' && !localDoc) {
         this.logger.warn(`[Sync] Ignored remote UPDATE for non-existent document ID: ${docId}`);
         return;
-    }
-
-    // 3. Конфликт версий по временной метке (если локальная версия новее).
-    const remoteTimestampStr = remoteOp.ts || remoteOp.doc?.updatedAt || remoteOp.data?.updatedAt;
-    if (localDoc && remoteTimestampStr) {
+      }
+  
+      const remoteTimestampStr = remoteOp.ts || remoteOp.doc?.updatedAt || remoteOp.data?.updatedAt;
+      if (localDoc && remoteTimestampStr) {
         try {
-            const remoteTimestamp = new Date(remoteTimestampStr).getTime();
-            const localTimestamp = new Date(localDoc.updatedAt).getTime();
-            
-            if (localTimestamp > remoteTimestamp) {
-                this._emitter.emit('sync:conflict_resolved', {
-                    type: 'ignored_remote', reason: 'local_is_newer', docId,
-                    localTimestamp: localDoc.updatedAt, remoteTimestamp: remoteTimestampStr
-                });
-                this.logger.log(`[Sync] Ignored remote op for doc ${docId} because local version is newer.`);
-                return;
-            }
+          const remoteTimestamp = new Date(remoteTimestampStr).getTime();
+          const localTimestamp = new Date(localDoc.updatedAt).getTime();
+          if (localTimestamp > remoteTimestamp) {
+            this._emitter.emit('sync:conflict_resolved', {
+              type: 'ignored_remote', reason: 'local_is_newer', docId,
+              localTimestamp: localDoc.updatedAt, remoteTimestamp: remoteTimestampStr
+            });
+            this.logger.log(`[Sync] Ignored remote op for doc ${docId} because local version is newer.`);
+            return;
+          }
         } catch (e) {
-            this.logger.warn(`[Sync] Could not parse timestamp for conflict resolution. Error: ${e.message}`);
+          this.logger.warn(`[Sync] Could not parse timestamp for conflict resolution. Error: ${e.message}`);
         }
-    }
-
-    try {
-        // Теперь вызов _applyWalEntryToMemory более безопасен, т.к. основные проверки пройдены.
+      }
+  
+      try {
+        // Теперь вызов происходит внутри очереди с захваченной блокировкой.
         this._applyWalEntryToMemory(remoteOp, true, false);
-        // Записываем в WAL, чтобы пережить перезапуск, с пометкой _remote.
         const entry = { ...remoteOp, _remote: true };
+        // Записываем в WAL, чтобы пережить перезапуск.
         await appendWalEntry(this.walPath, entry, this.logger);
-    } catch (err) {
-        // Если ошибка все же произошла (например, нарушение уникального индекса), помещаем в карантин.
+      } catch (err) {
         this.logger.error(`[Sync] Failed to apply remote op. Quarantining. Op: ${JSON.stringify(remoteOp)}`, err.message);
         await this._quarantineOperation(remoteOp, err);
-    }
+      }
+    });
   }
   // --- ИСПРАВЛЕНИЕ ЗАКАНЧИВАЕТСЯ ЗДЕСЬ ---
   
