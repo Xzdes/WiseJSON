@@ -190,18 +190,23 @@ class SyncManager extends EventEmitter {
         return true;
     }
 
-    // --- ИСПРАВЛЕНИЕ НАЧИНАЕТСЯ ЗДЕСЬ ---
     async _performPush() {
-        const walEntries = await readWal(this.collection.walPath, null, { recover: true, logger: this.logger });
+        // 1. Читаем все записи из WAL
+        const allWalEntries = await readWal(this.collection.walPath, null, { recover: true, logger: this.logger });
 
-        if (walEntries.length === 0) {
-            return false; // Нет активности для отправки
+        // 2. ФИЛЬТРУЕМ! Оставляем только локальные изменения (те, у которых нет флага _remote)
+        const localWalEntries = allWalEntries.filter(entry => !entry._remote);
+
+        // 3. Если после фильтрации ничего не осталось, то и отправлять нечего
+        if (localWalEntries.length === 0) {
+            return false;
         }
 
         let allBatchesPushedSuccessfully = true;
 
-        for (let i = 0; i < walEntries.length; i += this.pushBatchSize) {
-            const batch = walEntries.slice(i, i + this.pushBatchSize);
+        // 4. Итерируем по отфильтрованному массиву локальных изменений
+        for (let i = 0; i < localWalEntries.length; i += this.pushBatchSize) {
+            const batch = localWalEntries.slice(i, i + this.pushBatchSize);
             const batchId = uuidv4();
 
             try {
@@ -223,14 +228,13 @@ class SyncManager extends EventEmitter {
             }
         }
         
-        // Компакцию (сохранение состояния клиента) выполняем только если ВСЕ батчи из WAL были успешно отправлены.
+        // 5. Компакцию выполняем только если ВСЕ батчи из WAL были успешно отправлены.
         if (allBatchesPushedSuccessfully) {
             await this.collection.compactWalAfterPush();
         }
         
         return true; // Активность была
     }
-    // --- ИСПРАВЛЕНИЕ ЗАКАНЧИВАЕТСЯ ЗДЕСЬ ---
     
     async _performHeartbeat() {
         try {
