@@ -345,3 +345,4 @@ Please check our contributor guidelines (if available) or simply create an Issue
 This project is licensed under the MIT License. See the `LICENSE` file for details.
 
 Author: Xzdes ([xzdes@yandex.ru](mailto:xzdes@yandex.ru))
+```

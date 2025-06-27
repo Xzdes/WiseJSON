@@ -1,5 +1,4 @@
 ```markdown
-docs/03-transactions.md
 # 03 - Работа с Транзакциями
 
 Транзакции в WiseJSON DB позволяют сгруппировать несколько операций записи (таких как вставка, обновление, удаление) в одну атомарную единицу. Это гарантирует, что либо все операции в транзакции успешно выполняются и их изменения сохраняются, либо, если на любом этапе до фиксации (commit) возникает ошибка, ни одна из операций не применяется, и база данных остается в состоянии, предшествующем началу транзакции.
@@ -42,7 +41,7 @@ const logsTxn = txn.collection('logs');
 
 ### Шаг 3: Выполнение операций
 
-Теперь вы можете вызывать методы записи (`insert`, `insertMany`, `update`, `updateMany`, `remove`, `removeMany`, `clear`) на этих транзакционных коллекциях.
+Теперь вы можете вызывать методы записи (`insert`, `insertMany`, `update`, `remove`, `clear`) на этих транзакционных коллекциях.
 
 *   **Ключевой момент:** Эти операции не применяются к базе данных немедленно. Они лишь регистрируются внутри объекта транзакции и будут выполнены единым блоком только после вызова `txn.commit()`.
 *   **Возвращаемые значения:** Транзакционные методы записи в текущей реализации **не возвращают** результат операции (например, вставленный документ). Они возвращают `Promise<void>`.
@@ -50,7 +49,8 @@ const logsTxn = txn.collection('logs');
 
 ```javascript
 // Генерируем ID пользователя заранее, так как он понадобится для лога
-const newUserId = `user-${Date.now()}`;
+const { v4: uuidv4 } = require('uuid');
+const newUserId = uuidv4();
 
 // Регистрируем операции в транзакции
 await usersTxn.insert({
@@ -81,6 +81,7 @@ await logsTxn.insert({
 ```javascript
 const WiseJSON = require('wise-json-db');
 const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 
 async function transactionCommitExample() {
   const db = new WiseJSON(path.resolve(__dirname, 'myAppDb'));
@@ -92,7 +93,7 @@ async function transactionCommitExample() {
   
   // Начинаем транзакцию
   const txn = db.beginTransaction();
-  const newUserId = `user-tx-${Date.now()}`;
+  const newUserId = uuidv4();
 
   try {
     const txnUsers = txn.collection('users');
@@ -106,7 +107,8 @@ async function transactionCommitExample() {
     });
     await txnLogs.insert({
       event: 'USER_REGISTRATION_TXN',
-      userId: newUserId
+      userId: newUserId,
+      timestamp: new Date().toISOString()
     });
     
     // Если все успешно, коммитим транзакцию
@@ -119,18 +121,21 @@ async function transactionCommitExample() {
     await txn.rollback();
     console.log('Транзакция отменена (rollback).');
   } finally {
-    await db.close();
+    if (db) {
+        await db.close();
+    }
   }
 }
+
+transactionCommitExample();
 ```
 
 #### Полный Пример Сценария с `rollback`
 
-Этот пример показывает, как транзакция отменяется при возникновении ошибки.
+Этот пример показывает, как транзакция отменяется при возникновении ошибки. Предположим, у нас есть коллекция `accounts` с документами `{ _id: 'acc1', balance: 100 }` и `{ _id: 'acc2', balance: 50 }`.
 
 ```javascript
 // ... инициализация db и коллекции 'accounts' ...
-// Начальные данные: { _id: 'acc1', balance: 100 }, { _id: 'acc2', balance: 50 }
 
 const txn = db.beginTransaction();
 const transferAmount = 30;

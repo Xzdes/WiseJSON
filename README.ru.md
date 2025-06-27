@@ -345,3 +345,4 @@ WiseJSON DB уделяет особое внимание сохранности 
 Проект распространяется под лицензией MIT. См. файл `LICENSE` для подробностей.
 
 Автор: Xzdes ([xzdes@yandex.ru](mailto:xzdes@yandex.ru))
+```

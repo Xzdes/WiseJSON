@@ -1,150 +1,137 @@
-# Введение и Настройка
+```markdown
+# 00 - Введение и Настройка
 
-Добро пожаловать в WiseJSON — встраиваемую JSON‑базу данных для Node.js с поддержкой транзакций, WAL, TTL, индексов и двухсторонней синхронизации.
+Добро пожаловать в WiseJSON DB — быструю, надежную и простую в использовании встраиваемую JSON-базу данных для Node.js. Она разработана для высокой производительности и сохранности данных благодаря механизмам журналирования (WAL), чекпоинтов, атомарных транзакций и поддержки индексов.
+
+Этот документ поможет вам быстро начать работу с WiseJSON DB.
+
+## Ключевые концепции
+
+*   **База данных (Database):** Физическое хранилище на диске, представленное одной директорией. Содержит одну или несколько коллекций.
+*   **Коллекция (Collection):** Аналог таблицы в SQL или коллекции в MongoDB. Это именованная группа JSON-документов.
+*   **Документ (Document):** Отдельная запись в коллекции, представленная JavaScript-объектом. Каждый документ имеет уникальное поле `_id`.
 
 ## Установка
 
+Установите пакет с помощью npm или yarn:
+
 ```bash
 npm install wise-json-db
+# или
+yarn add wise-json-db
 ```
+Это установит пакет `wise-json-db` и все необходимые зависимости (`uuid`, `proper-lockfile`).
 
-Это установит пакет `wise-json-db` и все необходимые зависимости (`uuid`, `proper-lockfile` и др.).
+## Быстрый старт
 
-## Быстрый старт (Node.js)
+Этот пример показывает полный цикл работы: инициализация, создание, чтение, обновление и удаление данных.
 
-```js
+```javascript
 // Подключаем библиотеку
-const { connect } = require('wise-json-db');
+const WiseJSON = require('wise-json-db');
+const path = require('path');
 
-(async () => {
-  // Создаём новый экземпляр или открываем существующую БД в директории './data'
-  const db = connect('./data', {
-    // опции (необязательно):
-    //   autocreate: true,    // автосоздание папки
-    //   ttlInterval: 60000   // интервал очистки TTL в мс
-  });
+async function main() {
+    // 1. Указываем путь, где будет храниться база данных.
+    const dbPath = path.resolve(__dirname, 'myAppData');
 
-  // Работа с коллекцией 'users'
-  const users = db.collection('users');
+    // 2. Создаем или открываем экземпляр БД и дожидаемся его инициализации.
+    const db = new WiseJSON(dbPath);
+    await db.init();
 
-  // Вставка одного документа
-  await users.insertOne({ id: 1, name: 'Alice' });
+    // 3. Получаем (или создаем) коллекцию 'users' и ждем ее готовности.
+    const users = await db.collection('users');
+    await users.initPromise;
+    
+    // Для чистоты примера очистим коллекцию перед началом
+    await users.clear();
 
-  // Вставка нескольких документов
-  await users.insertMany([
-    { id: 2, name: 'Bob' },
-    { id: 3, name: 'Carol' }
-  ]);
+    // 4. Вставляем документы
+    await users.insert({ name: 'Alice', age: 30, city: 'New York' });
+    await users.insertMany([
+        { name: 'Bob', age: 25, city: 'London' },
+        { name: 'Charlie', age: 35, city: 'New York' }
+    ]);
+    console.log(`После вставки в коллекции ${await users.count()} документа.`);
 
-  // Поиск всех документов
-  const all = await users.find({});
-  console.log(all);
+    // 5. Ищем документы
+    const userBob = await users.findOne({ name: 'Bob' });
+    console.log('Найден Bob:', userBob);
 
-  // Поиск одного документа
-  const alice = await users.findOne({ id: 1 });
-  console.log(alice);
+    const usersFromNY = await users.find({ city: 'New York' });
+    console.log(`Пользователей из New York: ${usersFromNY.length}`);
 
-  // Обновление одного документа
-  await users.updateOne(
-    { id: 2 },
-    { $set: { name: 'Bobby', active: true } }
-  );
+    // 6. Обновляем документ
+    if (userBob) {
+        await users.update(userBob._id, { age: 26, status: 'active' });
+        const updatedBob = await users.getById(userBob._id);
+        console.log('Обновленный Bob:', updatedBob);
+    }
 
-  // Удаление документов
-  await users.deleteOne(alice._id);
-  await users.deleteMany(() => true); // удалить всё
+    // 7. Удаляем документ
+    const charlie = await users.findOne({ name: 'Charlie' });
+    if (charlie) {
+        await users.remove(charlie._id);
+        console.log(`Пользователь Charlie удален. Осталось документов: ${await users.count()}`);
+    }
 
-  // Закрыть базу
-  await db.close();
-})();
+    // 8. Обязательно закрываем БД для сохранения всех изменений.
+    await db.close();
+    console.log('База данных закрыта.');
+}
+
+main().catch(console.error);
 ```
 
-## Публичный API
+## Структура публичного API
 
-```js
+Основной экспорт пакета `wise-json-db` предоставляет доступ к ключевым классам и функциям:
+
+```javascript
 const {
-  WiseJSON,          // Класс базы (для расширённых сценариев)
-  connect,           // Функция-конструктор
-  Collection,        // Класс коллекции (альтернативный синхронный способ)
-  Document,          // Класс документа (для ручной работы)
-  SyncManager,       // Менеджер синхронизации (PUSH/PULL)
-  apiClient,         // HTTP-клиент для работы с удалённым сервером
-  WALManager,        // Низкоуровневый менеджер журнала WAL
-  CheckpointManager, // Менеджер чекпоинтов
-  TransactionManager,// Менеджер транзакций
-  logger             // Общий логгер
+  WiseJSON,          // Основной класс базы данных
+  Collection,        // Класс коллекции (для type hinting или расширения)
+  SyncManager,       // Менеджер синхронизации (для продвинутых сценариев)
+  // и другие утилиты...
 } = require('wise-json-db');
 ```
 
-### connect(dbPath: string, options?: object) → WiseJSON
+### `new WiseJSON(dbPath, [options])`
 
-* **dbPath** — путь к корневой директории хранения (будет создана, если не существует).
-* **options** — необязательные настройки:
+Конструктор для создания экземпляра БД.
 
-  * `autocreate` (boolean) — автосоздание папки.
-  * `ttlInterval` (number) — интервал очистки TTL в миллисекундах.
-  * `logLevel` (string) — уровень логирования (`info`, `warn`, `error`, `debug`).
+*   `dbPath {string}`: Путь к корневой директории базы данных.
+*   `options {object}` (необязательно): Объект для тонкой настройки.
 
-Возвращает экземпляр `WiseJSON`, у которого есть:
+### Методы экземпляра `db`
 
-* `.collection(name: string)` — возвращает экземпляр коллекции.
-* `.close()` — завершает работу и снимает все блокировки.
+*   **`await db.init()`**: Асинхронно инициализирует базу данных. **Обязательно вызывать** после создания экземпляра.
+*   **`await db.collection(name)`**: Возвращает экземпляр коллекции. Не забывайте дожидаться `collection.initPromise`.
+*   **`await db.close()`**: Корректно закрывает базу данных, сохраняя все несохраненные данные и снимая блокировки. **Обязательно вызывать** перед завершением работы приложения.
+*   **`db.beginTransaction()`**: Начинает новую транзакцию.
 
-### Collection (аналог MongoDB)
+### Основные методы коллекции
 
-Коллекция поддерживает следующие методы:
+| Метод                          | Описание                                                                     |
+| ------------------------------ | ---------------------------------------------------------------------------- |
+| `await collection.insert(doc)`     | Вставить один документ.                                                      |
+| `await collection.insertMany(docs)`| Вставить массив документов.                                                  |
+| `await collection.find(filter)`    | Найти все документы, соответствующие фильтру (объект-запрос).                |
+| `await collection.findOne(filter)` | Найти первый документ, соответствующий фильтру.                              |
+| `await collection.update(id, data)`| Частично обновить документ по его `_id`.                                     |
+| `await collection.updateMany(filter, update)`| Обновить все документы по фильтру (используя операторы `$set`, `$inc`). |
+| `await collection.remove(id)`      | Удалить документ по его `_id`.                                               |
+| `await collection.deleteMany(filter)` | Удалить все документы, соответствующие фильтру.                               |
+| `await collection.count()`         | Посчитать количество документов в коллекции.                                 |
+| `await collection.clear()`         | Удалить все документы из коллекции.                                          |
 
-| Метод                        | Описание                                                                           |
-| ---------------------------- | ---------------------------------------------------------------------------------- |
-| `insertOne(doc)`             | Вставить один документ.                                                            |
-| `insertMany(docs)`           | Вставить массив документов.                                                        |
-| `find(filter)`               | Вернуть массив документов, соответствующих `filter` (объект или функция-предикат). |
-| `findOne(filter)`            | Вернуть первый документ, соответствующий фильтру.                                  |
-| `updateOne(filter, update)`  | Обновить первый документ по фильтру (поддержка `$set`, `$inc` и др.).              |
-| `updateMany(filter, update)` | Обновить все документы по фильтру.                                                 |
-| `deleteOne(idOrPredicate)`   | Удалить один документ по `_id` или предикату.                                      |
-| `deleteMany(predicate)`      | Удалить все документы, для которых предикат вернёт `true`.                         |
+> **Примечание:** `filter` для `find`, `findOne` и `deleteMany` — это объект, описывающий условия поиска, аналогично MongoDB (например, `{ age: { $gt: 25 } }`).
 
-> **Примечание:** `filter` поддерживает как объектный синтаксис (равенство полей), так и функцию-предикат:
->
-> ```js
-> users.find({ active: true });
-> users.find(doc => doc.age > 30);
-> ```
+## Дальнейшие шаги
 
-### SyncManager и синхронизация
+Теперь, когда вы знакомы с основами, вы можете перейти к более детальному изучению:
 
-Для двусторонней синхронизации локальных изменений с удалённым сервером:
-
-```js
-const sync = new SyncManager(db, {
-  interval: 5000,             // интервал синхронизации в мс
-  endpoint: 'https://api.example.com',
-  auth: { user: 'u', pass: 'p' }
-});
-sync.start();
-
-// Остановить синхронизацию
-sync.stop();
-```
-
-`apiClient` позволяет вручную отправлять запросы:
-
-```js
-await apiClient.push(db, 'collectionName');
-await apiClient.pull(db, 'collectionName');
-```
-
-## Дополнительная документация
-
-* **[Коллекции и документы](01-collections-and-documents.md)**
-* **[Запросы и индексация](02-querying-and-indexing.md)**
-* **[Транзакции](03-transactions.md)**
-* **[Продвинутые возможности](04-advanced-features.md)**
-* **[Шпаргалка сценариев](05-common-scenarios-cheatsheet.md)**
-* **[Устранение неисправностей](06-troubleshooting.md)**
-* **[Синхронизация](07-sync.md)**
-
----
-
-Теперь у вас есть единая точка входа `connect` и полное описание API для Node.js. Приятной разработки!
+*   **[01 - Работа с Коллекциями и Документами](01-collections-and-documents.md)**
+*   **[02 - Запросы к Данным и Индексирование](02-querying-and-indexing.md)**
+*   **[03 - Работа с Транзакциями](03-transactions.md)**
+*   **[04 - Расширенные Возможности и Конфигурация](04-advanced-features.md)**
