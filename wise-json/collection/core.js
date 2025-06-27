@@ -399,7 +399,6 @@ class Collection {
         const timestampForFile = timestamp.replace(/[:.]/g, '-');
         const metaPath = path.join(this.checkpointsDir, `checkpoint_meta_${this.name}_${timestampForFile}.json`);
         
-        // Передаем логгер в утилиту
         await writeJsonFileSafe(metaPath, meta, null, this.logger);
 
         const aliveDocs = Array.from(this.documents.values());
@@ -481,16 +480,16 @@ class Collection {
     this._emitter.off(eventName, listener);
   }
   
+  // --- ИСПРАВЛЕНИЕ НАЧИНАЕТСЯ ЗДЕСЬ ---
   async compactWalAfterPush() {
-    return this._enqueue(async () => {
-        try {
-            await fs.writeFile(this.walPath, '', 'utf8');
-            this.logger.log(`[Collection] WAL for '${this.name}' compacted after successful sync push.`);
-        } catch(err) {
-            this.logger.error(`[Collection] Failed to compact WAL for '${this.name}' after push: ${err.message}`);
-        }
-    });
+    // После успешной отправки данных на сервер, мы должны зафиксировать
+    // текущее состояние клиента, создав чекпоинт. Это сохранит данные
+    // в памяти на диск и позволит безопасно очистить WAL.
+    // Метод flushToDisk уже делает всё это.
+    this.logger.log(`[Collection] Compacting local state for '${this.name}' after successful sync push by flushing to disk.`);
+    return this.flushToDisk();
   }
+  // --- ИСПРАВЛЕНИЕ ЗАКАНЧИВАЕТСЯ ЗДЕСЬ ---
 
   enableSync(syncOptions) {
     if (this.syncManager) {

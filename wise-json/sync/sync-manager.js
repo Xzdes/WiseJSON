@@ -3,7 +3,6 @@
 const { v4: uuidv4 } = require('uuid');
 const EventEmitter = require('events');
 const { readWal } = require('../wal-manager.js');
-// const logger = require('../logger'); // --- УДАЛЕНО: Глобальный импорт больше не нужен.
 
 /**
  * SyncManager - orchestrates robust, two-way synchronization with a remote server.
@@ -25,7 +24,7 @@ class SyncManager extends EventEmitter {
     constructor({
         collection,
         apiClient,
-        logger, // +++ ИЗМЕНЕНИЕ: Принимаем logger
+        logger,
         minSyncIntervalMs = 5000,
         maxSyncIntervalMs = 60000,
         heartbeatIntervalMs = 30000,
@@ -44,8 +43,6 @@ class SyncManager extends EventEmitter {
         this.maxSyncIntervalMs = maxSyncIntervalMs;
         this.heartbeatIntervalMs = heartbeatIntervalMs;
         this.autoStartLoop = autoStartLoop;
-
-        // +++ ИЗМЕНЕНИЕ: Сохраняем логгер с фоллбэком
         this.logger = logger || require('../logger');
 
         this._state = 'stopped'; // stopped, idle, syncing, error
@@ -53,7 +50,6 @@ class SyncManager extends EventEmitter {
         this._initialSyncComplete = false;
         this._timeoutId = null;
 
-        // State properties
         this.lastKnownServerLSN = 0;
         this.currentInterval = this.minSyncIntervalMs;
         this.lastActivityTime = Date.now();
@@ -61,7 +57,6 @@ class SyncManager extends EventEmitter {
 
     start() {
         if (this._state !== 'stopped') return;
-        // +++ ИЗМЕНЕНИЕ: Используем this.logger
         this.logger.log(`[SyncManager] Starting for collection '${this.collection.name}'.`);
         this._state = 'idle';
         if (this.autoStartLoop) {
@@ -75,7 +70,6 @@ class SyncManager extends EventEmitter {
             this._timeoutId = null;
         }
         this._state = 'stopped';
-        // +++ ИЗМЕНЕНИЕ: Используем this.logger
         this.logger.log(`[SyncManager] Stopped for collection '${this.collection.name}'.`);
     }
 
@@ -113,25 +107,19 @@ class SyncManager extends EventEmitter {
         this.emit('sync:start', { lsn: this.lastKnownServerLSN });
 
         try {
-            // Step 1: Initial full sync (if needed)
             if (!this._initialSyncComplete) {
                 await this._performInitialSync();
                 this._initialSyncComplete = true;
             }
 
-            // Step 2: PULL changes from the server first to reduce conflicts
             const pullActivity = await this._performPull();
-
-            // Step 3: PUSH local changes to the server in batches
             const pushActivity = await this._performPush();
             
-            // Step 4: Perform a heartbeat if there's no activity
             const activityDetected = pullActivity || pushActivity;
             if (!activityDetected && Date.now() - this.lastActivityTime > this.heartbeatIntervalMs) {
                 await this._performHeartbeat();
             }
 
-            // Step 5: Adjust sync interval based on activity
             if (activityDetected) {
                 this.currentInterval = this.minSyncIntervalMs;
                 this.lastActivityTime = Date.now();
@@ -148,7 +136,7 @@ class SyncManager extends EventEmitter {
 
         } catch (err) {
             this._state = 'error';
-            this.currentInterval = Math.min(this.currentInterval * 2, this.maxSyncIntervalMs); // Exponential backoff on error
+            this.currentInterval = Math.min(this.currentInterval * 2, this.maxSyncIntervalMs);
             this.emit('sync:error', {
                 message: `Sync cycle failed: ${err.message}`,
                 originalError: err,
@@ -186,7 +174,7 @@ class SyncManager extends EventEmitter {
         const response = await this.apiClient.get(pullUrl);
 
         if (!response || !Array.isArray(response.ops) || response.ops.length === 0) {
-            return false; // No activity
+            return false;
         }
 
         const serverOps = response.ops;
@@ -199,21 +187,22 @@ class SyncManager extends EventEmitter {
         }
 
         this.emit('sync:pull_success', { pulled: serverOps.length, lsn: this.lastKnownServerLSN });
-        return true; // Activity detected
+        return true;
     }
 
+    // --- ИСПРАВЛЕНИЕ НАЧИНАЕТСЯ ЗДЕСЬ ---
     async _performPush() {
-        // We read all WAL entries since they represent local truth. The server will handle duplicates.
-        // +++ ИЗМЕНЕНИЕ: Передаем логгер в readWal через опции
         const walEntries = await readWal(this.collection.walPath, null, { recover: true, logger: this.logger });
 
         if (walEntries.length === 0) {
-            return false; // No activity
+            return false; // Нет активности для отправки
         }
+
+        let allBatchesPushedSuccessfully = true;
 
         for (let i = 0; i < walEntries.length; i += this.pushBatchSize) {
             const batch = walEntries.slice(i, i + this.pushBatchSize);
-            const batchId = uuidv4(); // Unique ID for idempotent push
+            const batchId = uuidv4();
 
             try {
                 const response = await this.apiClient.post('/sync/push', { batchId, ops: batch });
@@ -228,23 +217,27 @@ class SyncManager extends EventEmitter {
                     lsn: this.lastKnownServerLSN,
                 });
             } catch (err) {
-                // If a batch fails, we stop the push process for this cycle. It will be retried.
+                // Если хоть один батч не прошел, прерываем PUSH и НЕ делаем компакцию.
+                allBatchesPushedSuccessfully = false;
                 throw new Error(`Push failed on batch ${batchId}: ${err.message}`);
             }
         }
         
-        // After a successful push, we can compact the local WAL, as the server has confirmed receipt.
-        await this.collection.compactWalAfterPush();
-        return true; // Activity detected
+        // Компакцию (сохранение состояния клиента) выполняем только если ВСЕ батчи из WAL были успешно отправлены.
+        if (allBatchesPushedSuccessfully) {
+            await this.collection.compactWalAfterPush();
+        }
+        
+        return true; // Активность была
     }
+    // --- ИСПРАВЛЕНИЕ ЗАКАНЧИВАЕТСЯ ЗДЕСЬ ---
     
     async _performHeartbeat() {
         try {
             await this.apiClient.get('/sync/health');
-            this.lastActivityTime = Date.now(); // Reset timer even on heartbeat
+            this.lastActivityTime = Date.now();
             this.emit('sync:heartbeat_success');
         } catch (err) {
-            // A failed heartbeat is a sync error
             throw new Error(`Heartbeat failed: ${err.message}`);
         }
     }
