@@ -9,17 +9,19 @@ document.addEventListener('DOMContentLoaded', () => {
         indexes: [],
         currentPage: 0,
         pageSize: 10,
-        totalDocs: 0, // Приблизительное количество для пагинации
+        totalDocs: 0, 
         filter: {},
         sort: { field: '_id', order: 'asc' },
         writeMode: false,
     };
 
     // --- DOM элементы ---
+    const toastNotifications = document.getElementById('toastNotifications');
+    const dbMap = document.getElementById('dbMap');
     const collectionSelect = document.getElementById('collectionSelect');
+    const queryBuilder = document.getElementById('queryBuilder');
     const refreshBtn = document.getElementById('refreshBtn');
     const applyBtn = document.getElementById('applyBtn');
-    const filterInput = document.getElementById('filterInput');
     const sortInput = document.getElementById('sortInput');
     const orderSelect = document.getElementById('orderSelect');
     const pageSizeInput = document.getElementById('pageSizeInput');
@@ -35,6 +37,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const createIndexBtn = document.getElementById('createIndexBtn');
     const serverModeEl = document.getElementById('server-mode');
 
+    // --- Утилитарная функция для уведомлений ---
+    function showToast(message, type = 'info') {
+        // "Лениво" получаем элемент в момент вызова
+        const toastElement = document.getElementById('toastNotifications');
+        if (toastElement && typeof toastElement.show === 'function') {
+            toastElement.show(message, type);
+        } else {
+            // Фоллбэк, если компонент еще не готов
+            console.warn('Toast component not ready, falling back to alert.', { message, type });
+            alert(`${type.toUpperCase()}: ${message}`);
+        }
+    }
+
     // --- API Функции ---
     async function apiFetch(url, options = {}) {
         try {
@@ -43,21 +58,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 const errorData = await response.json();
                 throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
             }
-            // Для DELETE запросов, которые могут не вернуть тело
             const contentType = response.headers.get("content-type");
             if (contentType && contentType.indexOf("application/json") !== -1) {
                 return response.json();
             }
             return {};
         } catch (error) {
-            alert(`API Error: ${error.message}`);
+            showToast(error.message, 'error');
             console.error('API Fetch Error:', error);
             throw error;
         }
     }
 
     // --- Функции рендеринга ---
-
     function renderCollections() {
         collectionSelect.innerHTML = '<option value="">-- Select a collection --</option>';
         state.collections.forEach(col => {
@@ -85,6 +98,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const headers = new Set(['_actions']);
         state.documents.forEach(doc => Object.keys(doc).forEach(key => headers.add(key)));
         
+        const fieldsForBuilder = Array.from(headers).filter(h => h !== '_actions');
+        queryBuilder.setFields(fieldsForBuilder);
+
         const headerRow = document.createElement('tr');
         headers.forEach(key => {
             const th = document.createElement('th');
@@ -96,7 +112,7 @@ document.addEventListener('DOMContentLoaded', () => {
         state.documents.forEach(doc => {
             const row = document.createElement('tr');
             row.addEventListener('click', () => {
-                documentViewer.value = JSON.stringify(doc, null, 2);
+                documentViewer.value = doc; 
                 document.querySelectorAll('#dataTable tr').forEach(r => r.classList.remove('selected'));
                 row.classList.add('selected');
             });
@@ -108,7 +124,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     viewBtn.textContent = 'View';
                     viewBtn.onclick = (e) => {
                          e.stopPropagation();
-                         documentViewer.value = JSON.stringify(doc, null, 2);
+                         documentViewer.value = doc;
                     };
                     td.appendChild(viewBtn);
 
@@ -157,13 +173,12 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderPagination() {
         pageInfo.textContent = `Page ${state.currentPage + 1}`;
         prevBtn.disabled = state.currentPage === 0;
-        // Приблизительная логика для кнопки "Next"
         nextBtn.disabled = state.documents.length < state.pageSize;
     }
     
     function updateWriteModeUI() {
         document.querySelectorAll('.write-op').forEach(el => {
-            el.style.display = state.writeMode ? 'inline-block' : 'none';
+            el.style.display = state.writeMode ? 'flex' : 'none';
         });
         if (state.writeMode) {
             serverModeEl.textContent = 'Server Mode: Write-Enabled';
@@ -172,22 +187,38 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- Логика обработчиков событий ---
-
     async function loadInitialData() {
         try {
-            state.collections = await apiFetch('/api/collections');
+            const [collectionsData, graphData, permissions] = await Promise.all([
+                apiFetch('/api/collections'),
+                apiFetch('/api/schema-graph'),
+                apiFetch('/api/permissions')
+            ]);
+            
+            state.collections = collectionsData;
+            dbMap.render(graphData);
             renderCollections();
-            // Попытка определить, включен ли режим записи
-            const testWrite = await fetch(`/api/collections/test/indexes/test`, { method: 'DELETE' });
-            state.writeMode = testWrite.status !== 403;
+
+            state.writeMode = permissions.writeMode;
             updateWriteModeUI();
-        } catch (e) { /* ignore */ }
+        } catch (e) { 
+            // Ошибки уже обработаны и показаны в apiFetch
+        }
     }
 
-    async function loadCollectionData() {
-        if (!state.currentCollection) return;
+    async function loadCollectionData(collectionName) {
+        state.currentCollection = collectionName;
+        collectionSelect.value = collectionName;
+
+        if (!state.currentCollection) {
+            state.documents = [];
+            state.indexes = [];
+            renderDocuments();
+            renderIndexes();
+            queryBuilder.setFields([]);
+            return;
+        };
         
-        // Загрузка документов
         const offset = state.currentPage * state.pageSize;
         const query = new URLSearchParams({
             limit: state.pageSize,
@@ -196,55 +227,63 @@ document.addEventListener('DOMContentLoaded', () => {
             order: state.sort.order,
             filter: JSON.stringify(state.filter)
         });
-        state.documents = await apiFetch(`/api/collections/${state.currentCollection}?${query}`);
         
-        // Загрузка статистики и индексов
-        const statsData = await apiFetch(`/api/collections/${state.currentCollection}/stats`);
+        const [docs, statsData] = await Promise.all([
+            apiFetch(`/api/collections/${state.currentCollection}?${query}`),
+            apiFetch(`/api/collections/${state.currentCollection}/stats`)
+        ]);
+
+        state.documents = docs;
         state.indexes = statsData.indexes || [];
         
         renderDocuments();
         renderIndexes();
         renderPagination();
     }
-
-    async function handleSelectCollection() {
-        state.currentCollection = collectionSelect.value;
+    
+    function handleSelectCollection() {
         state.currentPage = 0;
-        if (state.currentCollection) {
-            await loadCollectionData();
-        } else {
-            // Очистить все
-            state.documents = [];
-            state.indexes = [];
-            renderDocuments();
-            renderIndexes();
-        }
+        const selectedName = collectionSelect.value;
+        loadCollectionData(selectedName);
+    }
+    
+    function handleMapSelection(event) {
+        state.currentPage = 0;
+        const { collectionName } = event.detail;
+        loadCollectionData(collectionName);
+    }
+
+    function handleFilterChange(event) {
+        state.filter = event.detail.filter;
     }
 
     function handleApplyFilters() {
-        state.currentPage = 0;
-        try {
-            state.filter = filterInput.value ? JSON.parse(filterInput.value) : {};
-        } catch (e) {
-            alert('Invalid JSON in filter input.');
+        if (!state.currentCollection) {
+            showToast('Please select a collection first.', 'error');
             return;
         }
+        state.currentPage = 0;
         state.sort.field = sortInput.value || '_id';
         state.sort.order = orderSelect.value;
         state.pageSize = parseInt(pageSizeInput.value, 10) || 10;
-        loadCollectionData();
+        loadCollectionData(state.currentCollection);
     }
     
     async function handleDeleteDocument(docId) {
         if (!confirm(`Are you sure you want to delete document with ID: ${docId}?`)) return;
         await apiFetch(`/api/collections/${state.currentCollection}/doc/${docId}`, { method: 'DELETE' });
-        loadCollectionData(); // Перезагрузить данные
+        showToast(`Document ${docId.substring(0, 8)}... removed.`, 'success');
+        await loadCollectionData(state.currentCollection);
     }
     
     async function handleCreateIndex() {
+        if (!state.currentCollection) {
+            showToast('Please select a collection first to create an index.', 'error');
+            return;
+        }
         const fieldName = indexFieldInput.value.trim();
         if (!fieldName) {
-            alert('Index field name cannot be empty.');
+            showToast('Index field name cannot be empty.', 'error');
             return;
         }
         const isUnique = uniqueCheckbox.checked;
@@ -253,24 +292,39 @@ document.addEventListener('DOMContentLoaded', () => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ fieldName: fieldName, unique: isUnique })
         });
+        showToast(`Index on "${fieldName}" created.`, 'success');
         indexFieldInput.value = '';
         uniqueCheckbox.checked = false;
-        loadCollectionData(); // Перезагрузить данные для отображения нового индекса
+        await loadCollectionData(state.currentCollection);
     }
 
     async function handleDeleteIndex(fieldName) {
         if (!confirm(`Are you sure you want to delete the index on field: "${fieldName}"?`)) return;
         await apiFetch(`/api/collections/${state.currentCollection}/indexes/${fieldName}`, { method: 'DELETE' });
-        loadCollectionData(); // Перезагрузить
+        showToast(`Index on "${fieldName}" dropped.`, 'success');
+        await loadCollectionData(state.currentCollection);
+    }
+    
+    function handlePrevPage() {
+        if (state.currentPage > 0) {
+            state.currentPage--;
+            loadCollectionData(state.currentCollection);
+        }
+    }
+    
+    function handleNextPage() {
+        state.currentPage++;
+        loadCollectionData(state.currentCollection);
     }
 
     // --- Назначение обработчиков ---
-    
+    dbMap.addEventListener('collection-selected', handleMapSelection);
+    queryBuilder.addEventListener('filter-changed', handleFilterChange);
     collectionSelect.addEventListener('change', handleSelectCollection);
     refreshBtn.addEventListener('click', loadInitialData);
     applyBtn.addEventListener('click', handleApplyFilters);
-    prevBtn.addEventListener('click', () => { if(state.currentPage > 0) { state.currentPage--; loadCollectionData(); }});
-    nextBtn.addEventListener('click', () => { state.currentPage++; loadCollectionData(); });
+    prevBtn.addEventListener('click', handlePrevPage);
+    nextBtn.addEventListener('click', handleNextPage);
     createIndexBtn.addEventListener('click', handleCreateIndex);
 
     // --- Инициализация ---

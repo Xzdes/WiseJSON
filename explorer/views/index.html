@@ -3,6 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <title>WiseJSON Data Explorer</title>
+    <!-- +++ НОВОЕ: Указываем иконку для вкладки браузера +++ -->
+    <link rel="icon" type="image/png" href="/favicon.ico">
     <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -12,15 +14,22 @@
     </header>
 
     <main>
+        <section id="db-map-container">
+            <h2>Database Map</h2>
+            <db-map id="dbMap"></db-map>
+        </section>
+        
+        <hr>
+
         <section class="controls-grid">
             <div class="control-group">
                 <label for="collectionSelect">Select Collection:</label>
                 <select id="collectionSelect"></select>
                 <button id="refreshBtn">Refresh</button>
             </div>
-            <div class="control-group">
-                <label for="filterInput">Filter (JSON):</label>
-                <input type="text" id="filterInput" placeholder='{"age": {"$gt": 25}}'>
+            <div class="control-group" id="query-builder-container">
+                <label>Filter:</label>
+                <query-builder id="queryBuilder"></query-builder>
             </div>
              <div class="control-group">
                 <label for="sortInput">Sort by Field:</label>
@@ -74,10 +83,14 @@
         
         <section id="viewer">
             <h3>Document Viewer</h3>
-            <textarea id="documentViewer" rows="10" readonly></textarea>
+            <json-viewer id="documentViewer"></json-viewer>
         </section>
     </main>
 
+    <!-- Подключаем скрипты компонентов -->
+    <script src="/static/components/db-map.js"></script>
+    <script src="/static/components/query-builder.js"></script>
+    <script src="/static/components/json-viewer.js"></script>
     <script src="/static/script.js"></script>
 </body>
 </html>
