@@ -1,8 +1,8 @@
 {
   "name": "wise-json-db",
-  "version": "6.0.1",
+  "version": "6.0.2",
   "description": "Blazing fast, crash-proof embedded JSON database for Node.js with batch operations, TTL, indexes, and segmented checkpointing.",
-  "main": "index.js",
+  "main": "wise-json/index.js",
   "type": "commonjs",
   "scripts": {
     "test": "node test/run-all-tests.js",
