@@ -1,0 +1,51 @@
+# Имя нашего workflow, будет отображаться во вкладке "Actions" на GitHub
+name: Docker Publish
+
+# Триггеры: когда запускать этот workflow
+on:
+  # 1. Запускать при каждом пуше в ветку 'main'
+  push:
+    branches: [ "main" ]
+  # 2. Запускать при создании нового релиза на GitHub
+  release:
+    types: [ published ]
+
+# Задания (jobs), которые будут выполняться
+jobs:
+  # У нас будет одно задание: сборка и публикация
+  build-and-push:
+    # Запускаем на последней версии Ubuntu, предоставляемой GitHub
+    runs-on: ubuntu-latest
+    
+    # Шаги (steps), из которых состоит задание
+    steps:
+      # 1. Клонируем код нашего репозитория на виртуальную машину
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # 2. Логинимся в Docker Hub, используя секреты, которые мы создали
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 3. Извлекаем метаданные (теги) для нашего образа.
+      # Это умный шаг, который автоматически создаст правильные теги:
+      # - 'latest' для пуша в main
+      # - 'v1.2.3', '1.2', '1' для релиза v1.2.3
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ваш_логин/wisejson-server  # <-- ЗАМЕНИТЕ "ваш_логин" НА ВАШ ЛОГИН DOCKER HUB
+
+      # 4. Собираем Docker-образ и публикуем его в репозиторий Docker Hub
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true # Указываем, что нужно именно опубликовать (push)
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

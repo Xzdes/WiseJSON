@@ -1,0 +1,28 @@
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Зависимости (устанавливаются внутри контейнера)
+node_modules
+
+# Локальные данные и временные файлы
+wise-json-db-data/
+*.log
+*.tmp
+*.lock
+
+# Документация и тесты не нужны в финальном образе
+docs/
+test/
+README.md
+README.ru.md
+DOCKER.md
+
+# Файлы IDE
+.vscode/
+.idea/

@@ -1,0 +1,46 @@
+# Версия синтаксиса Docker Compose
+version: '3.8'
+
+# Описание наших сервисов (контейнеров)
+services:
+  # Даем нашему сервису имя 'wisejson-server'
+  wisejson-server:
+    # Инструкция по сборке: использовать Dockerfile из текущей директории.
+    # Для продакшена или быстрого старта это можно заменить на:
+    # image: xzdes/wisejson-server:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    
+    # Имя контейнера для удобства управления
+    container_name: wisejson_server
+    
+    # Политика перезапуска: перезапускать контейнер автоматически,
+    # если он упал, но не после ручной остановки.
+    restart: unless-stopped
+    
+    # Проброс портов: порт 3000 на нашей машине будет вести к порту 3000 в контейнере.
+    ports:
+      - "3000:3000"
+      
+    # Тома (Volumes): самая важная часть для сохранения данных.
+    volumes:
+      # Мы создаем именованный том 'wisejson-data' и монтируем его
+      # в директорию /data внутри контейнера. Все данные, которые
+      # сервер запишет в /data, сохранятся в этом томе, а не в контейнере.
+      - wisejson-data:/data
+      
+    # Переменные окружения для конфигурации сервера.
+    # Легко изменяются прямо здесь.
+    environment:
+      - PORT=3000
+      - WISE_JSON_PATH=/data
+      - LOG_LEVEL=info
+      - WISEJSON_EXPLORER_ALLOW_WRITE=true
+      - WISEJSON_AUTH_USER=admin
+      - WISEJSON_AUTH_PASS=supersecret
+
+# Определение именованных томов. Docker будет управлять этим томом.
+volumes:
+  wisejson-data:
+    # Можно оставить пустым, Docker использует драйвер по умолчанию.

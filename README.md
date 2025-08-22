@@ -2,166 +2,101 @@
 
 ![WiseJSON Logo](logo.png)
 
-[npm version](https://npmjs.org/package/wise-json-db)  
-[License](https://github.com/Xzdes/WiseJSON/blob/master/LICENSE)  
-[Node.js CI](https://github.com/Xzdes/WiseJSON/actions/workflows/nodejs.yml)
+[![NPM Version](https://img.shields.io/npm/v/wise-json-db.svg)](https://npmjs.org/package/wise-json-db)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node.js CI](https://github.com/Xzdes/WiseJSON/actions/workflows/nodejs.yml/badge.svg)](https://github.com/Xzdes/WiseJSON/actions/workflows/nodejs.yml)
+[![Docker Hub](https://img.shields.io/badge/Docker%20Hub-your_username%2Fwisejson--server-blue)](https://hub.docker.com/r/your_username/wisejson-server)
 
-**WiseJSON DB** is an incredibly fast, crash-proof, embedded JSON database for Node.js, supporting batch operations, TTL (Time-To-Live), indexes, and segmented checkpoints. It’s designed for high performance, reliability, and seamless integration into your Node.js applications.
+**WiseJSON DB** is an incredibly fast, crash-proof, embedded JSON database for Node.js. It features a powerful sync engine, ACID transactions, and advanced indexing, making it a perfect choice for **offline-first** applications, desktop software, and robust backend services.
 
 ---
 
-## 🚀 Key Features
+## 🚀 Quick Start with Docker
 
-*   **High Performance:** Optimized read and write operations.
+The fastest way to get started is by running the WiseJSON server, which includes the **Data Explorer** web UI and the synchronization API, using Docker.
+
+**1. Run the official Docker image:**
+```bash
+docker run -d -p 3000:3000 \
+  -v wisejson_data:/data \
+  --name wisejson-server \
+  your_dockerhub_username/wisejson-server:latest
+```
+*(Replace `your_dockerhub_username` with the actual Docker Hub repository name)*
+
+**2. Open the Data Explorer:**
+Your server is now running! Navigate to **[http://localhost:3000](http://localhost:3000)** in your browser.
+
+Your database files are safely stored in a Docker volume named `wisejson_data`.
+
+➡️ For detailed instructions on configuration, data persistence, and using Docker Compose, see our **[Comprehensive Docker Guide](DOCKER.md)**.
+
+---
+
+## 💡 Key Features
+
+*   **High Performance:** In-memory indexing and optimized I/O for rapid data access.
 *   **Crash-Proof & Durable:**
-    *   **WAL (Write-Ahead Logging):** All changes are first written to a log, ensuring data recovery after crashes.
-    *   **Checkpoints:** Periodic snapshots of the database state for quick recovery.
-        *   **Segmented Checkpoints:** Large collections are automatically split into segments during checkpointing for better performance and memory management.
-        *   **Configurable number of checkpoints to keep.**
-    *   **Atomic File Writes:** Safe saving of JSON data and metadata using temporary files and atomic renames.
-    *   **Upfront Uniqueness Checks:** For `insert`, `insertMany`, and `update` operations, unique index violations are checked before writing to the WAL, preventing storage of invalid data.
-*   **ACID-Compliant Transactions:** Supports atomic transactions across multiple collections, ensuring data consistency.
-*   **Indexes:** Unique and non-unique indexes on document fields for significantly faster query operations.
-*   **TTL (Time-To-Live):** Automatic removal of expired documents based on lifespan or an exact expiration timestamp.
-*   **Batch Operations:** Efficient `insertMany` and `updateMany` for bulk data manipulation.
-*   **Embedded & File-Based:** Stores data locally on the file system, requiring no separate server Prozess.
-*   **Simple & Intuitive API:** Easy to get started with collections and documents.
-*   **Tooling:**
-    *   **Basic CLI (`wise-json`):** For core database operations via the command line.
-    *   **Data Explorer (web interface & advanced CLI `wisejson-explorer`):** For convenient browsing, exporting, and managing data and indexes.
-*   **Lightweight:** Minimal external dependencies (only `uuid` and `proper-lockfile`).
-*   **Graceful Shutdown:** Automatic and proper saving of all data when the application terminates normally.
-*   **Custom ID Generator:** Allows defining a custom function for generating `_id` field values.
-*   **Multi-Process Safety:** Utilizes `proper-lockfile` to prevent data corruption when accessed from multiple Node.js processes.
+    *   **WAL (Write-Ahead Logging):** Guarantees data integrity and recovery after crashes.
+    *   **Atomic Checkpoints:** Periodic snapshots for fast restarts, with segmentation for large collections.
+*   **ACID-Compliant Transactions:** Ensures data consistency across multi-collection operations.
+*   **Powerful Querying & Indexing:** Supports unique and non-unique indexes and a rich query syntax (`$gt`, `$in`, `$or`, etc.) for complex lookups.
+*   **Ready for Offline-First:** A robust sync engine to seamlessly synchronize local client data with a central server.
+*   **Tooling Included:** Comes with a web-based **Data Explorer** and a versatile **Command Line Interface (CLI)**.
+*   **Multi-Process Safety:** Uses file locking to prevent data corruption when accessed from multiple Node.js processes.
+*   **Lightweight & Simple API:** Minimal dependencies (`uuid`, `proper-lockfile`) and an intuitive, modern API.
 
 ---
 
-## 📦 Dependencies
+## 📥 Installation (As a Node.js Library)
 
-WiseJSON DB uses only two runtime dependencies:
-
-*   [`uuid`](https://www.npmjs.com/package/uuid) — for generating unique IDs by default.
-*   [`proper-lockfile`](https://www.npmjs.com/package/proper-lockfile) — for safe file locking, ensuring correct behavior when accessed from multiple processes.
-
-Both are installed automatically with:
+To embed WiseJSON DB directly into your Node.js application, install the library from NPM:
 
 ```bash
 npm install wise-json-db
 ```
 
-If you use a custom build system or bundle WiseJSON DB as part of a more complex package, ensure these packages are also included in your dependencies:
-
-```bash
-npm install uuid proper-lockfile
-```
-
 ---
 
-## 💡 Why WiseJSON DB?
+## 📚 Basic API Usage
 
-*   **Reliability First:** WAL, checkpoints, and atomic file writes are designed for maximum data safety, even during unexpected failures.
-*   **Fast Data Access:** Indexes and optimized operations ensure quick data retrieval and modification.
-*   **Easy Integration & Use:** No external services to set up. Start working with your data in minutes.
-*   **Full Data Control:** Your data is stored locally, giving you complete control over access and management.
-*   **JSON Flexibility:** Works natively with JSON, allowing storage of complex and nested data structures without predefined schemas.
-
----
-
-## 📥 Installation
-
-```bash
-npm install wise-json-db
-# or
-yarn add wise-json-db
-```
-
----
-
-## 📚 Basic Usage (API)
+The API is designed to be simple and intuitive, with "lazy" initialization.
 
 ```javascript
-const WiseJSON = require('wise-json-db');
+const { connect } = require('wise-json-db');
 const path = require('path');
 
-// Specify the path where your database will be stored
-const dbPath = path.resolve(__dirname, 'myDataBase');
+// `connect` creates a database instance. Initialization happens automatically on the first operation.
+const db = connect(path.resolve(__dirname, 'my-app-data'));
 
 async function main() {
-  // Initialize the database with options
-  const db = new WiseJSON(dbPath, {
-    ttlCleanupIntervalMs: 60000, // Check TTL every 60 seconds
-    checkpointIntervalMs: 300000 // Create a checkpoint every 5 minutes
-  });
-  await db.init(); // Important: wait for DB initialization
-
-  // Get (or create) a fully initialized collection named 'users'
+  // Getting a collection triggers the initialization if it hasn't happened yet.
   const users = await db.getCollection('users');
+  
+  await users.clear(); // Clean up for a predictable run
 
-  // Clean up for a predictable run
-  await users.clear();
+  // Create a unique index to prevent duplicate emails
+  await users.createIndex('email', { unique: true });
 
-  // Create indexes for fast queries
-  await users.createIndex('city'); // Standard index
-  await users.createIndex('email', { unique: true }); // Unique index
-  console.log('Indexes created:', await users.getIndexes());
-
-  // Insert a single document
-  await users.insert({ name: 'Alice', email: 'alice@example.com', age: 30, city: 'New York' });
-
-  // Batch insert multiple documents
+  // Insert documents
+  await users.insert({ name: 'Alice', email: 'alice@example.com', age: 30 });
   await users.insertMany([
-    { name: 'Bob', email: 'bob@example.com', age: 24, city: 'London' },
-    { name: 'Charlie', email: 'charlie@example.com', age: 35, city: 'Paris', tags: ['dev', 'cat_lover'] }
+    { name: 'Bob', email: 'bob@example.com', age: 24 },
+    { name: 'Charlie', email: 'charlie@example.com', age: 35, tags: ['dev'] }
   ]);
-  console.log(`Total users after insert: ${await users.count()}`);
 
-  // Find documents using a query object (modern, recommended way)
-  const usersFromLondon = await users.find({ city: 'London' });
-  console.log('Users from London:', usersFromLondon);
-
-  // Find a single document with operators
+  // Find a document using a rich query object
   const devUser = await users.findOne({ tags: 'dev', age: { $gt: 30 } });
-  console.log('First developer over 30:', devUser);
+  console.log('Developer over 30:', devUser);
 
-  // Update a document by ID
-  if (devUser) {
-    const updatedDevUser = await users.update(devUser._id, { age: devUser.age + 1, lastLogin: new Date().toISOString() });
-    console.log('Updated developer:', updatedDevUser);
-  }
-
-  // Batch update documents using a filter and update operators
-  const updateResult = await users.updateMany(
-    { age: { $gte: 25 } },    // Filter: find users 25 or older
-    { $set: { status: 'active' } } // Update operator: set their status
+  // Update a document using MongoDB-style operators
+  const { modifiedCount } = await users.updateOne(
+    { email: 'alice@example.com' },
+    { $set: { status: 'active' }, $inc: { age: 1 } }
   );
-  console.log(`Updated ${updateResult.modifiedCount} users to active status.`);
-
-  // Insert a document with TTL (expires in 5 seconds)
-  await users.insert({
-    email: 'temp@example.com',
-    message: 'This message will self-destruct in 5 seconds',
-    ttl: 5000 // in ms from createdAt
-  });
-  console.log('Inserted temporary data.');
-
-  // Example of a transaction
-  const txn = db.beginTransaction();
-  try {
-    const logsCollection = await db.collection('logs');
-    await logsCollection.initPromise;
-
-    // Operations within the transaction
-    await txn.collection('users').insert({ name: 'Diana', email: 'diana@example.com', age: 28 });
-    await txn.collection('logs').insert({ action: 'USER_CREATED', user: 'Diana', timestamp: Date.now() });
-    
-    await txn.commit(); // Apply the transaction
-    console.log('Transaction completed successfully.');
-  } catch (error) {
-    await txn.rollback(); // Rollback changes in case of an error
-    console.error('Transaction error, changes rolled back:', error);
-  }
-
-  // Close the database (important for saving all data)
+  console.log(`Updated ${modifiedCount} document(s).`);
+  
+  // Close the database to ensure all data is flushed to disk before the app exits.
   await db.close();
   console.log('Database closed.');
 }
@@ -169,179 +104,33 @@ async function main() {
 main().catch(console.error);
 ```
 
----
-
-## ⚙️ Configuration
-
-When creating a `WiseJSON` instance, you can pass an options object:
-
-```javascript
-const db = new WiseJSON('/path/to/your/db', {
-  // Interval for automatic cleanup of expired TTL documents (in milliseconds).
-  // Default: 60000 (1 minute)
-  ttlCleanupIntervalMs: 60000,
-
-  // Interval for automatic checkpoint creation (in milliseconds).
-  // 0 or a negative value disables timed checkpoints.
-  // Default: 300000 (5 minutes)
-  checkpointIntervalMs: 300000,
-
-  // Maximum number of entries in the WAL file before a checkpoint is forcibly created.
-  // 0 or a negative value disables this trigger.
-  // Default: 1000
-  maxWalEntriesBeforeCheckpoint: 1000,
-
-  // Maximum size of a single data segment in a checkpoint (in bytes).
-  // Large collections will be split into multiple segments during checkpointing.
-  // Default: 2 * 1024 * 1024 (2MB)
-  maxSegmentSizeBytes: 2097152,
-
-  // Number of recent checkpoints to keep. Older ones will be deleted.
-  // Minimum value: 1.
-  // Default: 5
-  checkpointsToKeep: 5,
-
-  // Custom function to generate document _id values.
-  // Defaults to a uuid-based generator.
-  idGenerator: () => `my-custom-id-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-
-  // Options for reading the WAL file during collection initialization.
-  // Default: { recover: false, strict: false }
-  //   recover: true - Attempt to recover data by skipping corrupted WAL lines (with a warning).
-  //   strict: true - Throw an error on the first WAL line parsing error.
-  // If recover=false and strict=false (default), corrupted lines are skipped with a warning.
-  walReadOptions: {
-    recover: true, 
-    strict: false
-  },
-});
-```
+For a deeper dive into the API, check out the documentation in the `/docs` directory.
 
 ---
 
 ## 🛠️ Command Line Interface (CLI)
 
-WiseJSON DB includes two command-line tools:
+WiseJSON DB includes a powerful CLI for database administration.
 
-### 1️⃣ Basic CLI: `wise-json`
-
-Designed for fundamental database operations. Can be installed globally or used via `npx`.
-
-Example commands:
 ```bash
-# Help
-wise-json help
+# See all available commands
+wise-json --help
 
-# List all collections
-wise-json list
+# List all collections in the database
+wise-json list-collections
 
-# Collection information (stats, indexes)
-wise-json info <collection_name>
+# Show documents with filtering and sorting
+wise-json show-collection users --limit 5 --sort age --order desc
 
-# Insert a document (JSON as a string)
-wise-json insert <collection_name> '{"name":"John","age":30}'
-
-# Batch insert from data.json file
-wise-json insert-many <collection_name> data.json
-# Batch insert with a TTL of 1 hour
-wise-json insert-many <collection_name> data.json --ttl 3600000
-
-# Find documents (filter is a JSON string supporting operators: $gt, $lt, $in, $regex, $or, $and)
-wise-json find <collection_name> '{"age":{"$gt":25}}'
-wise-json find <collection_name> '{"$or":[{"city":"London"},{"tags":{"$in":["dev"]}}]}'
-
-# Get document by ID
-wise-json get <collection_name> <document_id>
-
-# Remove document by ID
-wise-json remove <collection_name> <document_id>
-
-# Clear all documents from a collection
-wise-json clear <collection_name>
-
-# Export collection to a file
-wise-json export <collection_name> export_data.json
-
-# Import documents from a file into a collection
-wise-json import <collection_name> import_data.json
+# Create an index (requires the --allow-write flag for modifying operations)
+wise-json create-index users email --unique --allow-write
 ```
 
-**Environment Variables for `wise-json`:**
-
-*   `WISE_JSON_PATH`: Path to the database directory (default: `./wise-json-db-data`).
-*   `WISE_JSON_LANG`: CLI interface language (`ru` or `en`, default: `en`).
-
-### 2️⃣ Advanced CLI & Data Explorer: `wisejson-explorer`
-
-This tool provides more advanced data manipulation features, including CSV export, index management, and serves as the backend for the Data Explorer web UI.
-
-Example `wisejson-explorer` commands:
-```bash
-# Help
-wisejson-explorer --help
-
-# List collections
-wisejson-explorer list-collections
-
-# Show collection documents with filtering, sorting, pagination
-wisejson-explorer show-collection <collection_name> --limit 5 --offset 0 --sort age --order desc --filter '{"city":"London"}'
-
-# Export collection to JSON (default) or CSV
-wisejson-explorer export-collection <collection_name> data.json
-wisejson-explorer export-collection <collection_name> data.csv --output csv
-
-# Import data into a collection (modes: append, replace)
-# Requires --allow-write for write operations
-wisejson-explorer import-collection <collection_name> data.json --mode replace --allow-write
-
-# Manage indexes
-wisejson-explorer list-indexes <collection_name>
-wisejson-explorer create-index <collection_name> <field_name> --unique --allow-write
-wisejson-explorer drop-index <collection_name> <field_name> --allow-write
-```
-By default, `wisejson-explorer` operates in read-only mode. For operations that modify data (import, index creation/deletion), use the `--allow-write` flag.
-
 ---
-
-## 🌐 Data Explorer (Web UI)
-
-To run the Data Explorer web interface, use the command:
-```bash
-node explorer/server.js
-# or, if installed globally or as a project dependency:
-wisejson-explorer-server
-```
-The web UI will be available at [http://127.0.0.1:3000](http://127.0.0.1:3000) (default port, can be changed via the `PORT` environment variable).
-
-The Data Explorer allows you to browse collections and documents, apply filters, sort, and paginate. For access protection, you can use the `WISEJSON_AUTH_USER` and `WISEJSON_AUTH_PASS` environment variables.
-
----
-
-## 🔒 Durability and Fault Tolerance
-
-WiseJSON DB prioritizes data safety:
-*   **Write-Ahead Logging (WAL):** Every data modification (insert, update, delete) is first recorded in a WAL file. Only after a successful write to the WAL is the operation applied to the in-memory data. In case of an application or server crash, the WAL file is read upon restart, and any logged operations that weren't fully completed are applied, restoring the database to its state момент the crash.
-*   **Checkpoints:** Periodically (or when the WAL reaches a certain size), a complete snapshot (checkpoint) of a collection's data state is created. This significantly speeds up recovery, as only WAL entries made *after* the last successful checkpoint need to be applied. Old checkpoints are automatically pruned.
-*   **Atomic File Writes:** When saving checkpoints and other critical data files, a strategy of writing to a temporary file followed by an atomic rename operation is used. This prevents corruption of the main data file if a crash occurs during the write process.
-*   **File Locking:** The use of `proper-lockfile` ensures correct operation with database files even with concurrent access from multiple Node.js processes, preventing data races and file corruption.
-
----
-
 ## 🤝 Contributing
 
-We welcome your contributions to make WiseJSON DB even better! You can help by:
-
-*   Reporting bugs
-*   Suggesting new features or improvements
-*   Submitting Pull Requests with fixes or new code
-
-Please check our contributor guidelines (if available) or simply create an Issue on GitHub.
-
----
+Contributions are welcome! Whether it's bug reports, feature suggestions, or pull requests, your help is appreciated. Please feel free to open an issue to discuss your ideas.
 
 ## 📄 License
 
 This project is licensed under the MIT License. See the `LICENSE` file for details.
-
-Author: Xzdes ([xzdes@yandex.ru](mailto:xzdes@yandex.ru))
-```
